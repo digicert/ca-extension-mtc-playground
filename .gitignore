@@ -1,0 +1,28 @@
+# MTC Bridge build artifacts
+bin/
+keys/
+
+# Go
+*.exe
+*.test
+*.out
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Generated
+scripts/__pycache__/
+
+# Docker
+docker-compose.override.yml
+
+# Secrets
+*.key
+!config.example.yaml

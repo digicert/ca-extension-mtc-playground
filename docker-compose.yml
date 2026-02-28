@@ -1,0 +1,67 @@
+# Docker Compose for mtc-bridge with PostgreSQL state store.
+#
+# The DigiCert CA MariaDB is assumed to be running separately on its own
+# Docker network (digicert-ca_default). This compose file provides:
+#   - mtc-bridge service
+#   - PostgreSQL 16 state store
+#
+# Usage:
+#   docker compose up -d
+#   docker compose logs -f mtc-bridge
+services:
+  # PostgreSQL state store for mtc-bridge
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mtcbridge
+      POSTGRES_USER: mtcbridge
+      POSTGRES_PASSWORD: ${MTC_POSTGRES_PASSWORD:-mtcbridge}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U mtcbridge" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mtc-internal
+
+  # MTC Bridge service
+  mtc-bridge:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MTC_STATE_DB_HOST: postgres
+      MTC_STATE_DB_PORT: "5432"
+      MTC_STATE_DB_USERNAME: mtcbridge
+      MTC_STATE_DB_PASSWORD: ${MTC_POSTGRES_PASSWORD:-mtcbridge}
+      MTC_STATE_DB_DATABASE: mtcbridge
+      MTC_CADB_HOST: ${MTC_CADB_HOST:-ca-db}
+      MTC_CADB_PORT: ${MTC_CADB_PORT:-3306}
+      MTC_CADB_USERNAME: ${MTC_CADB_USERNAME:-caadmin}
+      MTC_CADB_PASSWORD: ${MTC_CADB_PASSWORD:-capassword}
+      MTC_CADB_DATABASE: ${MTC_CADB_DATABASE:-digicert_ca}
+    volumes:
+      - ./config.yaml:/etc/mtc-bridge/config.yaml:ro
+      - ./keys:/etc/mtc-bridge/keys:ro
+    ports:
+      - "${MTC_HTTP_PORT:-8080}:8080"
+    networks:
+      - mtc-internal
+      - digicert-ca_default
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+
+
+networks:
+  mtc-internal:
+    driver: bridge
+  # External network where the DigiCert CA MariaDB resides.
+  digicert-ca_default:
+    external: true

@@ -1,0 +1,47 @@
+# MTC Bridge Configuration
+# Environment variable substitution: ${VAR} and ${VAR:-default}
+
+log:
+  name: "mtc-bridge"
+  origin: "${MTC_LOG_ORIGIN:-localhost/mtc-bridge}"
+  batch_size: 100
+
+state_db:
+  host: "${MTC_STATE_DB_HOST:-mtc-state-db}"
+  port: 5432
+  database: "mtcbridge"
+  username: "${MTC_STATE_DB_USER:-mtcbridge}"
+  password: "${MTC_STATE_DB_PASSWORD:-mtcpassword}"
+  ssl_mode: "disable"
+  max_open_conns: 25
+  max_idle_conns: 5
+  conn_max_lifetime: 5m
+
+ca_db:
+  host: "${MTC_CA_DB_HOST:-ca-db}"
+  port: 3306
+  database: "digicert_ca"
+  username: "${MTC_CA_DB_USER:-caadmin}"
+  password: "${MTC_CA_DB_PASSWORD:-capassword}"
+  issuer_id: ""  # empty = all CAs
+
+http:
+  addr: ":8080"
+  read_timeout: 10s
+  write_timeout: 30s
+  tile_cache_ttl: 24h
+  checkpoint_cache_ttl: 5s
+
+watcher:
+  poll_interval: 10s
+  revocation_poll_interval: 30s
+  checkpoint_interval: 60s
+  batch_size: 100
+
+cosigner:
+  key_file: "${MTC_COSIGNER_KEY_FILE:-/etc/mtc-bridge/cosigner.key}"
+  key_id: "mtc-bridge-cosigner"
+
+logging:
+  level: "${MTC_LOG_LEVEL:-info}"
+  format: "json"

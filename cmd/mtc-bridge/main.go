@@ -1,0 +1,179 @@
+// Command mtc-bridge is the main entry point for the MTC Bridge service.
+//
+// It wires together all components: config loading, database connections,
+// watcher, tlog-tiles HTTP API, and admin dashboard.
+package main
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/briantrzupek/ca-extension-merkle/internal/admin"
+	"github.com/briantrzupek/ca-extension-merkle/internal/cadb"
+	"github.com/briantrzupek/ca-extension-merkle/internal/config"
+	"github.com/briantrzupek/ca-extension-merkle/internal/cosigner"
+	"github.com/briantrzupek/ca-extension-merkle/internal/issuancelog"
+	"github.com/briantrzupek/ca-extension-merkle/internal/revocation"
+	"github.com/briantrzupek/ca-extension-merkle/internal/store"
+	"github.com/briantrzupek/ca-extension-merkle/internal/tlogtiles"
+	"github.com/briantrzupek/ca-extension-merkle/internal/watcher"
+)
+
+func main() {
+	configFile := flag.String("config", "config.yaml", "path to configuration file")
+	generateKey := flag.String("generate-key", "", "generate a new Ed25519 key and exit")
+	flag.Parse()
+
+	// Key generation mode.
+	if *generateKey != "" {
+		pub, err := cosigner.GenerateKey(*generateKey)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Generated Ed25519 key pair.\n")
+		fmt.Printf("Public key (hex): %x\n", pub)
+		fmt.Printf("Private key saved to: %s\n", *generateKey)
+		return
+	}
+
+	// Load configuration.
+	cfg, err := config.Load(*configFile)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error loading config: %v\n", err)
+		os.Exit(1)
+	}
+
+	// Set up structured logging.
+	logLevel := config.ParseLogLevel(cfg.Logging.Level)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel}))
+	slog.SetDefault(logger)
+
+	logger.Info("mtc-bridge starting",
+		"version", "0.1.0",
+		"config", *configFile,
+	)
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	// Connect to PostgreSQL state store.
+	stateStore, err := store.New(ctx, cfg.StateDB, logger.With("component", "store"))
+	if err != nil {
+		logger.Error("failed to connect to state store", "error", err)
+		os.Exit(1)
+	}
+	defer stateStore.Close()
+	logger.Info("connected to state store")
+
+	// Run migrations.
+	if err := stateStore.Migrate(ctx); err != nil {
+		logger.Error("migration failed", "error", err)
+		os.Exit(1)
+	}
+
+	// Connect to CA MariaDB database.
+	caAdapter, err := cadb.New(ctx, cfg.CADB, logger.With("component", "cadb"))
+	if err != nil {
+		logger.Error("failed to connect to CA database", "error", err)
+		os.Exit(1)
+	}
+	defer caAdapter.Close()
+	logger.Info("connected to CA database")
+
+	// Initialize cosigner.
+	cs, err := cosigner.New(cfg.Cosigner.KeyFile, cfg.Cosigner.KeyID, cfg.Log.Origin)
+	if err != nil {
+		logger.Error("failed to initialize cosigner", "error", err)
+		os.Exit(1)
+	}
+	logger.Info("cosigner initialized",
+		"key_id", cs.KeyID(),
+		"origin", cs.Origin(),
+		"public_key", cs.PublicKeyHex(),
+	)
+
+	// Create issuance log.
+	ilog := issuancelog.New(stateStore, cs, cfg.Log.Origin, logger.With("component", "issuancelog"))
+
+	// Create revocation manager.
+	revMgr := revocation.New(stateStore, logger.With("component", "revocation"))
+
+	// Create watcher.
+	watcherCfg := watcher.Config{
+		PollInterval:           cfg.Watcher.PollInterval,
+		CheckpointInterval:     cfg.Watcher.CheckpointInterval,
+		BatchSize:              cfg.Watcher.BatchSize,
+		RevocationPollInterval: cfg.Watcher.RevocationPollInterval,
+	}
+	w := watcher.New(caAdapter, stateStore, ilog, revMgr, watcherCfg, logger.With("component", "watcher"))
+
+	// Create HTTP handlers.
+	tlogHandler := tlogtiles.New(stateStore, revMgr, logger.With("component", "tlogtiles"))
+	adminHandler, err := admin.New(stateStore, w, logger.With("component", "admin"))
+	if err != nil {
+		logger.Error("failed to create admin handler", "error", err)
+		os.Exit(1)
+	}
+
+	// Build HTTP mux.
+	mux := http.NewServeMux()
+	mux.Handle("/checkpoint", tlogHandler)
+	mux.Handle("/tile/", tlogHandler)
+	mux.Handle("/revocation", tlogHandler)
+	mux.Handle("/proof/", tlogHandler)
+	mux.Handle("/admin", adminHandler)
+	mux.Handle("/admin/", adminHandler)
+
+	// Health check endpoint.
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","timestamp":"%s"}`, time.Now().UTC().Format(time.RFC3339))
+	})
+
+	server := &http.Server{
+		Addr:         cfg.HTTP.Addr,
+		Handler:      mux,
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  60 * time.Second,
+		BaseContext:  func(_ net.Listener) context.Context { return ctx },
+	}
+
+	// Start watcher in background.
+	go func() {
+		if err := w.Run(ctx); err != nil && ctx.Err() == nil {
+			logger.Error("watcher error", "error", err)
+		}
+	}()
+
+	// Start HTTP server in background.
+	go func() {
+		logger.Info("HTTP server starting", "addr", cfg.HTTP.Addr)
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			logger.Error("HTTP server error", "error", err)
+		}
+	}()
+
+	// Wait for shutdown signal.
+	<-ctx.Done()
+	logger.Info("shutdown signal received")
+
+	// Graceful shutdown with timeout.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer shutdownCancel()
+
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		logger.Error("HTTP server shutdown error", "error", err)
+	}
+
+	logger.Info("mtc-bridge stopped")
+}
