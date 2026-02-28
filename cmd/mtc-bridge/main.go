@@ -141,9 +141,15 @@ func main() {
 		"webhooks", len(issuerCfg.Webhooks),
 	)
 
+	// Build CA name map for admin visualization.
+	caNameMap := make(map[string]string)
+	for _, ca := range caAdapter.GetCAs() {
+		caNameMap[ca.ID] = ca.Name
+	}
+
 	// Create HTTP handlers.
 	tlogHandler := tlogtiles.New(stateStore, revMgr, cfg.Log.Origin, logger.With("component", "tlogtiles"))
-	adminHandler, err := admin.New(stateStore, w, issuer, cfg.Log.Origin, logger.With("component", "admin"))
+	adminHandler, err := admin.New(stateStore, w, issuer, cfg.Log.Origin, caNameMap, logger.With("component", "admin"))
 	if err != nil {
 		logger.Error("failed to create admin handler", "error", err)
 		os.Exit(1)

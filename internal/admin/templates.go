@@ -17,6 +17,7 @@ const dashboardHTML = `<!DOCTYPE html>
 			<div class="flex gap-4 text-sm">
 				<a href="/admin" class="font-semibold underline">Dashboard</a>
 				<a href="/admin/certs" class="opacity-75 hover:opacity-100">Certificates</a>
+				<a href="/admin/viz" class="opacity-75 hover:opacity-100">Visualization</a>
 			</div>
 		</div>
 	</nav>
@@ -160,6 +161,7 @@ const certBrowserHTML = `<!DOCTYPE html>
 			<div class="flex gap-4 text-sm">
 				<a href="/admin" class="opacity-75 hover:opacity-100">Dashboard</a>
 				<a href="/admin/certs" class="font-semibold underline">Certificates</a>
+				<a href="/admin/viz" class="opacity-75 hover:opacity-100">Visualization</a>
 			</div>
 		</div>
 	</nav>
@@ -244,6 +246,7 @@ const certDetailStartHTML = `<!DOCTYPE html>
 			<div class="flex gap-4 text-sm">
 				<a href="/admin" class="opacity-75 hover:opacity-100">Dashboard</a>
 				<a href="/admin/certs" class="opacity-75 hover:opacity-100">Certificates</a>
+				<a href="/admin/viz" class="opacity-75 hover:opacity-100">Visualization</a>
 			</div>
 		</div>
 	</nav>
@@ -256,5 +259,1071 @@ const certDetailEndHTML = `
 	<footer class="text-center text-gray-400 text-sm py-8">
 		mtc-bridge — Experimental MTC support for DigiCert Private CA
 	</footer>
+</body>
+</html>`
+
+const vizExplorerHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>MTC Bridge — Visualization</title>
+	<script src="https://cdn.tailwindcss.com"></script>
+	<style>
+		*{margin:0;padding:0;box-sizing:border-box}
+		.viz-body{background:#0a0e1a;color:#e2e8f0;min-height:calc(100vh - 56px);overflow-x:hidden}
+		.tabs{display:flex;justify-content:center;gap:4px;padding:10px 16px}
+		.tab{padding:8px 20px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#94a3b8;cursor:pointer;font-size:.85rem;transition:all .2s}
+		.tab:hover{background:#334155}
+		.tab.active{background:linear-gradient(135deg,#38bdf8,#818cf8);color:#0a0e1a;border-color:transparent;font-weight:600}
+		.controls{display:flex;justify-content:center;gap:8px;padding:6px 16px 10px;flex-wrap:wrap}
+		.controls button,.controls select{padding:6px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:.8rem;cursor:pointer;transition:all .2s}
+		.controls button:hover{background:#334155}
+		.btn-g{background:linear-gradient(135deg,#34d399,#22d3ee)!important;color:#0a0e1a!important;border:none!important;font-weight:600}
+		.stats{display:flex;gap:10px;justify-content:center;padding:0 16px 8px;flex-wrap:wrap}
+		.st{background:#1e293b;border-radius:8px;padding:5px 14px;font-size:.75rem;color:#94a3b8;text-align:center}
+		.st .v{font-size:1rem;font-weight:700;color:#e2e8f0}
+		.st .v.g{color:#34d399}.st .v.r{color:#f87171}.st .v.b{color:#38bdf8}.st .v.p{color:#a78bfa}
+		.main-viz{display:flex;height:calc(100vh - 280px);min-height:480px}
+		.viz{flex:1;position:relative;overflow:hidden}
+		.viz canvas{display:block}
+		.side{width:300px;background:#111827;border-left:1px solid #1e293b;overflow-y:auto;padding:14px;flex-shrink:0}
+		.side h3{font-size:.9rem;color:#38bdf8;margin-bottom:8px;display:flex;align-items:center;gap:6px}
+		.breadcrumb{display:flex;gap:4px;padding:0 16px 6px;flex-wrap:wrap;align-items:center}
+		.crumb{padding:3px 10px;border-radius:6px;font-size:.75rem;background:#1e293b;color:#94a3b8;cursor:pointer;transition:all .2s}
+		.crumb:hover{background:#334155}
+		.crumb.current{color:#38bdf8;border:1px solid #38bdf8}
+		.crumb-sep{color:#475569;font-size:.7rem}
+		.detail-card{background:#1e293b;border-radius:10px;padding:12px;margin-bottom:8px;border-left:4px solid #38bdf8;font-size:.78rem;line-height:1.6}
+		.detail-card.rev{border-left-color:#f87171;background:#1c1520}
+		.detail-card .domain{font-weight:600;color:#e2e8f0;font-size:.88rem}
+		.detail-card .meta{color:#64748b;margin-top:3px}
+		.tag{display:inline-block;padding:2px 8px;border-radius:99px;font-size:.7rem;font-weight:600;margin-top:4px}
+		.tag.valid{background:#064e3b;color:#34d399}
+		.tag.revoked{background:#450a0a;color:#f87171}
+		.tag.pq{background:#1e1b4b;color:#a78bfa}
+		.tag.classical{background:#172554;color:#60a5fa}
+		.tip{position:fixed;background:#1e293b;border:1px solid #475569;border-radius:10px;padding:12px 16px;font-size:.8rem;color:#e2e8f0;pointer-events:none;z-index:200;display:none;max-width:360px;box-shadow:0 8px 32px rgba(0,0,0,.5);line-height:1.6}
+		.legend-row{display:flex;gap:12px;justify-content:center;padding:6px 16px;flex-wrap:wrap}
+		.leg{display:flex;align-items:center;gap:5px;font-size:.73rem;color:#94a3b8}
+		.leg-c{width:12px;height:12px;border-radius:3px}
+		.loading-msg{text-align:center;color:#94a3b8;padding:60px 20px;font-size:1rem}
+		@media(max-width:768px){.main-viz{flex-direction:column;height:auto}.side{width:100%;border-left:none;border-top:1px solid #1e293b;max-height:300px}.viz{min-height:400px}}
+	</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+	<nav class="bg-indigo-700 text-white px-6 py-4 shadow">
+		<div class="flex items-center justify-between max-w-7xl mx-auto">
+			<h1 class="text-xl font-bold">MTC Bridge Dashboard</h1>
+			<div class="flex gap-4 text-sm">
+				<a href="/admin" class="opacity-75 hover:opacity-100">Dashboard</a>
+				<a href="/admin/certs" class="opacity-75 hover:opacity-100">Certificates</a>
+				<a href="/admin/viz" class="font-semibold underline">Visualization</a>
+			</div>
+		</div>
+	</nav>
+
+	<div class="viz-body">
+		<div class="tabs" style="padding-top:14px">
+			<div class="tab active" id="tabSunburst" onclick="switchView('sunburst')">Sunburst</div>
+			<div class="tab" id="tabTreemap" onclick="switchView('treemap')">Treemap</div>
+			<div class="tab" id="tabProof" onclick="switchView('proof')">Proof Explorer</div>
+		</div>
+		<div class="controls" id="vizControls">
+			<button class="btn-g" onclick="drillUp()">Drill Up</button>
+			<button onclick="resetView()">Reset</button>
+			<select id="colorMode" onchange="redraw()">
+				<option value="status">Color: Trust Status</option>
+				<option value="algorithm">Color: Key Algorithm</option>
+				<option value="age">Color: Certificate Age</option>
+				<option value="assertion">Color: Assertion Coverage</option>
+			</select>
+			<button id="btnRevoked" onclick="toggleRevokedHighlight()" style="border:1px solid #f87171;color:#f87171">Highlight Revoked</button>
+			<button onclick="loadData()">Refresh</button>
+		</div>
+		<div class="controls" id="proofControls" style="display:none">
+			<input type="number" id="proofIndex" placeholder="Enter leaf index..." min="0" style="padding:6px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:.85rem;width:200px" onkeydown="if(event.key==='Enter')loadProof()">
+			<button class="btn-g" onclick="loadProof()">Show Proof</button>
+			<span id="proofStatus" style="color:#64748b;font-size:.8rem;align-self:center"></span>
+		</div>
+		<div class="stats" id="statsBar"></div>
+		<div class="breadcrumb" id="breadcrumb"></div>
+		<div class="legend-row" id="legendRow"></div>
+		<div class="main-viz">
+			<div class="viz" id="vizPanel">
+				<canvas id="canvas"></canvas>
+				<div class="loading-msg" id="loadingMsg">Loading visualization data...</div>
+			</div>
+			<div class="side">
+				<h3 id="sideTitle">Details</h3>
+				<div id="sideContent"></div>
+			</div>
+		</div>
+	</div>
+	<div class="tip" id="tip"></div>
+
+	<script>
+	// ─── STATE ───
+	let hierarchy = null;
+	let revokedSet = new Set();
+	let vizStats = null;
+	let drillPath = [];
+	let currentNode = null;
+	let viewMode = 'sunburst';
+	let hoveredSegment = null;
+	let segments = [];
+	let leafCertsCache = {};
+	let highlightRevoked = false;
+	let proofData = null;
+	let proofSegments = [];
+
+	const canvas = document.getElementById('canvas');
+	const ctx = canvas.getContext('2d');
+
+	// ─── DATA LOADING ───
+	async function loadData() {
+		document.getElementById('loadingMsg').style.display = 'block';
+		try {
+			const [summaryRes, revokedRes, statsRes] = await Promise.all([
+				fetch('/admin/viz/summary'),
+				fetch('/admin/viz/revocations'),
+				fetch('/admin/viz/stats'),
+			]);
+			const summaryData = await summaryRes.json();
+			const revokedData = await revokedRes.json();
+			vizStats = await statsRes.json();
+
+			revokedSet = new Set(revokedData.revokedIndices || []);
+			hierarchy = transformNode(summaryData);
+			currentNode = hierarchy;
+			drillPath = [hierarchy];
+
+			renderStats();
+			renderBreadcrumb();
+			document.getElementById('loadingMsg').style.display = 'none';
+			redraw();
+			renderSidePanel(null);
+		} catch (err) {
+			console.error('Failed to load visualization data:', err);
+			document.getElementById('loadingMsg').textContent = 'Failed to load data. Retrying in 3s...';
+			setTimeout(loadData, 3000);
+		}
+	}
+
+	function transformNode(node) {
+		if (!node) return null;
+		const result = {
+			name: node.name || 'Unknown',
+			level: node.level === 'root' ? 0 : node.level === 'ca' ? 1 : node.level === 'batch' ? 2 : 3,
+			levelName: node.level || 'root',
+			certCount: node.certCount || 0,
+			revokedCount: node.revokedCount || 0,
+			pqCount: node.pqCount || 0,
+			classicalCount: node.classicalCount || 0,
+			freshCount: node.freshCount || 0,
+			staleCount: node.staleCount || 0,
+			missingCount: node.missingCount || 0,
+			color: node.color || '#475569',
+			children: (node.children || []).map(ch => transformNode(ch)),
+			path: [],
+		};
+		return result;
+	}
+
+	// ─── COLORS ───
+	function nodeRevRatio(node) {
+		return node.certCount > 0 ? node.revokedCount / node.certCount : 0;
+	}
+	function nodePQRatio(node) {
+		return node.certCount > 0 ? node.pqCount / node.certCount : 0;
+	}
+	function groupColor(node) {
+		const mode = document.getElementById('colorMode').value;
+		if (mode === 'assertion') {
+			const total = node.certCount || 1;
+			const freshRatio = (node.freshCount || 0) / total;
+			const staleRatio = (node.staleCount || 0) / total;
+			const missingRatio = (node.missingCount || 0) / total;
+			if (freshRatio > 0.8) return '#22c55e';
+			if (missingRatio > 0.5) return '#ef4444';
+			if (staleRatio > 0.3) return '#f59e0b';
+			return '#3b82f6';
+		}
+		return node.color || '#475569';
+	}
+
+	function certDotColor(cert) {
+		const mode = document.getElementById('colorMode').value;
+		const rev = cert.revoked;
+		if (mode === 'status') {
+			if (rev) return {fill:'#991b1b',stroke:'#f87171'};
+			return {fill:'#065f46',stroke:'#34d399'};
+		}
+		if (mode === 'algorithm') {
+			if (cert.isPQ) return {fill:rev?'#4a1942':'#312e81',stroke:rev?'#f87171':'#a78bfa'};
+			return {fill:rev?'#4a1942':'#172554',stroke:rev?'#f87171':'#60a5fa'};
+		}
+		if (mode === 'assertion') {
+			// For individual certs, we don't have per-cert assertion status in the leaf view,
+			// so color based on the parent node's assertion coverage
+			return {fill: rev ? '#991b1b' : '#1e3a5f', stroke: rev ? '#f87171' : '#3b82f6'};
+		}
+		// age — use issuedAt
+		const age = cert.issuedAt ? (Date.now() - new Date(cert.issuedAt).getTime()) / 86400000 : 7;
+		const t = Math.min(age / 14, 1);
+		const r = Math.round(52 + t * 200), g = Math.round(211 - t * 160), b = Math.round(153 - t * 100);
+		return {fill:rev?'#991b1b':'rgb('+Math.round(r*.25)+','+Math.round(g*.25)+','+Math.round(b*.25)+')',stroke:rev?'#f87171':'rgb('+r+','+g+','+b+')'};
+	}
+
+	// ─── SUNBURST ───
+	function drawSunburst() {
+		const W = canvas.width / devicePixelRatio, H = canvas.height / devicePixelRatio;
+		const cx = W / 2, cy = H / 2;
+		const maxR = Math.min(W, H) / 2 - 30;
+		const node = currentNode;
+		const children = node.children || [];
+		if (!children.length) { drawLeafGrid(); return; }
+
+		segments = [];
+		const total = children.reduce((s, ch) => s + ch.certCount, 0);
+		if (!total) {
+			ctx.fillStyle = '#475569'; ctx.textAlign = 'center'; ctx.font = '14px system-ui';
+			ctx.fillText('No certificates in tree', cx, cy);
+			return;
+		}
+
+		// Center circle
+		const innerR = maxR * 0.18;
+		ctx.beginPath(); ctx.arc(cx, cy, innerR, 0, Math.PI * 2);
+		ctx.fillStyle = '#1e293b'; ctx.fill();
+		ctx.strokeStyle = '#334155'; ctx.lineWidth = 2; ctx.stroke();
+		ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'center';
+		ctx.fillText(node.name, cx, cy - 6);
+		ctx.fillStyle = '#94a3b8'; ctx.font = '11px system-ui';
+		ctx.fillText(total.toLocaleString() + ' certs', cx, cy + 12);
+
+		// Ring 1: children
+		let angle = -Math.PI / 2;
+		const gap = 0.008;
+		children.forEach((ch) => {
+			const sweep = (ch.certCount / total) * Math.PI * 2 - gap;
+			if (sweep <= 0) return;
+			const r1 = innerR + 6, r2 = maxR * 0.48;
+			const rr = nodeRevRatio(ch);
+			const baseColor = groupColor(ch);
+
+			ctx.beginPath(); ctx.arc(cx, cy, r2, angle, angle + sweep); ctx.arc(cx, cy, r1, angle + sweep, angle, true); ctx.closePath();
+			const dimmed = highlightRevoked && rr === 0;
+			const grad = ctx.createRadialGradient(cx, cy, r1, cx, cy, r2);
+			grad.addColorStop(0, baseColor + (dimmed ? '10' : '40')); grad.addColorStop(1, baseColor + (dimmed ? '20' : '90'));
+			ctx.fillStyle = grad; ctx.fill();
+			ctx.strokeStyle = dimmed ? baseColor + '30' : baseColor; ctx.lineWidth = 1; ctx.stroke();
+
+			if (rr > 0) {
+				const revAlpha = highlightRevoked ? '90' : '50';
+				ctx.beginPath(); ctx.arc(cx, cy, r2, angle, angle + sweep * rr); ctx.arc(cx, cy, r1, angle + sweep * rr, angle, true); ctx.closePath();
+				ctx.fillStyle = '#f87171' + revAlpha; ctx.fill();
+				ctx.strokeStyle = '#f87171'; ctx.lineWidth = highlightRevoked ? 2.5 : 1.5; ctx.stroke();
+			}
+
+			const midA = angle + sweep / 2;
+			const labelR = (r1 + r2) / 2;
+			const lx = cx + Math.cos(midA) * labelR, ly = cy + Math.sin(midA) * labelR;
+			if (sweep > 0.15) {
+				ctx.save(); ctx.translate(lx, ly);
+				let rot = midA; if (rot > Math.PI / 2 || rot < -Math.PI / 2) rot += Math.PI;
+				ctx.rotate(rot);
+				ctx.fillStyle = '#e2e8f0'; ctx.font = Math.min(11, Math.max(7, sweep * 30)) + 'px system-ui'; ctx.textAlign = 'center';
+				const label = ch.name.length > 18 ? ch.name.slice(0, 16) + '\u2026' : ch.name;
+				ctx.fillText(label, 0, 0);
+				ctx.fillStyle = '#94a3b8'; ctx.font = Math.min(9, Math.max(6, sweep * 22)) + 'px system-ui';
+				ctx.fillText(ch.certCount.toLocaleString(), 0, 12);
+				ctx.restore();
+			}
+
+			segments.push({type:'arc',cx,cy,r1,r2,startAngle:angle,endAngle:angle+sweep,node:ch});
+
+			// Ring 2: sub-children
+			if (ch.children && ch.children.length) {
+				const r3 = maxR * 0.48 + 4, r4 = maxR * 0.72;
+				let subAngle = angle;
+				const subTotal = ch.certCount;
+				ch.children.forEach(sub => {
+					const subSweep = (sub.certCount / subTotal) * sweep - gap * 0.5;
+					if (subSweep <= 0.005) { subAngle += subSweep + gap * 0.5; return; }
+					const subRR = nodeRevRatio(sub);
+					ctx.beginPath(); ctx.arc(cx, cy, r4, subAngle, subAngle + subSweep); ctx.arc(cx, cy, r3, subAngle + subSweep, subAngle, true); ctx.closePath();
+					const sg = ctx.createRadialGradient(cx, cy, r3, cx, cy, r4);
+					sg.addColorStop(0, baseColor + '25'); sg.addColorStop(1, baseColor + '55');
+					ctx.fillStyle = sg; ctx.fill();
+					ctx.strokeStyle = baseColor + '80'; ctx.lineWidth = 0.5; ctx.stroke();
+					if (subRR > 0) {
+						ctx.beginPath(); ctx.arc(cx, cy, r4, subAngle, subAngle + subSweep * subRR); ctx.arc(cx, cy, r3, subAngle + subSweep * subRR, subAngle, true); ctx.closePath();
+						ctx.fillStyle = '#f8717140'; ctx.fill();
+					}
+					if (subSweep > 0.08) {
+						const smA = subAngle + subSweep / 2;
+						const slr = (r3 + r4) / 2;
+						const sx = cx + Math.cos(smA) * slr, sy = cy + Math.sin(smA) * slr;
+						ctx.save(); ctx.translate(sx, sy);
+						let sr = smA; if (sr > Math.PI / 2 || sr < -Math.PI / 2) sr += Math.PI;
+						ctx.rotate(sr);
+						ctx.fillStyle = '#cbd5e1'; ctx.font = Math.min(9, Math.max(6, subSweep * 25)) + 'px system-ui'; ctx.textAlign = 'center';
+						ctx.fillText(sub.name.length > 14 ? sub.name.slice(0, 12) + '\u2026' : sub.name, 0, 0);
+						ctx.restore();
+					}
+					segments.push({type:'arc',cx,cy,r1:r3,r2:r4,startAngle:subAngle,endAngle:subAngle+subSweep,node:sub});
+					subAngle += subSweep + gap * 0.5;
+				});
+			}
+
+			// Ring 3: PQ glow
+			const r5 = maxR * 0.74, r6 = maxR * 0.82;
+			const pqRatio = nodePQRatio(ch);
+			if (pqRatio > 0) {
+				ctx.beginPath(); ctx.arc(cx, cy, r6, angle, angle + sweep * pqRatio); ctx.arc(cx, cy, r5, angle + sweep * pqRatio, angle, true); ctx.closePath();
+				ctx.fillStyle = '#a78bfa30'; ctx.fill();
+				ctx.strokeStyle = '#a78bfa60'; ctx.lineWidth = 0.5; ctx.stroke();
+			}
+
+			angle += sweep + gap;
+		});
+
+		ctx.fillStyle = '#475569'; ctx.font = '9px system-ui'; ctx.textAlign = 'center';
+		ctx.fillText('Outer glow = Post-Quantum algorithm ratio', cx, cy + maxR * 0.9);
+	}
+
+	// ─── TREEMAP ───
+	function drawTreemap() {
+		const W = canvas.width / devicePixelRatio, H = canvas.height / devicePixelRatio;
+		const node = currentNode;
+		const children = node.children || [];
+		if (!children.length) { drawLeafGrid(); return; }
+
+		segments = [];
+		const items = children.map(ch => ({node:ch, value:ch.certCount})).filter(x => x.value > 0);
+		if (!items.length) {
+			ctx.fillStyle = '#475569'; ctx.textAlign = 'center'; ctx.font = '14px system-ui';
+			ctx.fillText('No certificates in tree', W / 2, H / 2);
+			return;
+		}
+
+		const rects = squarify(items.map(x => x.value), {x:8,y:8,w:W-16,h:H-16});
+
+		items.forEach((item, i) => {
+			const r = rects[i]; if (!r) return;
+			const rr = nodeRevRatio(item.node);
+			const baseColor = groupColor(item.node);
+			const pad = 2;
+
+			const dimmed = highlightRevoked && rr === 0;
+			ctx.fillStyle = baseColor + (dimmed ? '08' : '20');
+			ctx.strokeStyle = baseColor + (dimmed ? '30' : '80');
+			ctx.lineWidth = 1.5;
+			roundRect(ctx, r.x + pad, r.y + pad, r.w - pad * 2, r.h - pad * 2, 6);
+			ctx.fill(); ctx.stroke();
+
+			if (rr > 0) {
+				const stripH = highlightRevoked ? Math.max(6, (r.h - pad * 2) * Math.max(rr, 0.15)) : Math.max(3, (r.h - pad * 2) * rr);
+				ctx.fillStyle = highlightRevoked ? '#f8717160' : '#f8717130';
+				roundRect(ctx, r.x + pad, r.y + r.h - pad - stripH, r.w - pad * 2, stripH, 0);
+				ctx.fill();
+				ctx.strokeStyle = '#f87171'; ctx.lineWidth = highlightRevoked ? 2 : 1;
+				ctx.beginPath(); ctx.moveTo(r.x + pad, r.y + r.h - pad - stripH); ctx.lineTo(r.x + r.w - pad, r.y + r.h - pad - stripH); ctx.stroke();
+				if (highlightRevoked) {
+					ctx.strokeStyle = '#f87171'; ctx.lineWidth = 2;
+					roundRect(ctx, r.x + pad, r.y + pad, r.w - pad * 2, r.h - pad * 2, 6); ctx.stroke();
+				}
+			}
+
+			const pqR = nodePQRatio(item.node);
+			if (pqR > 0 && r.w > 30) {
+				const barW = (r.w - pad * 2 - 8) * pqR;
+				ctx.fillStyle = '#a78bfa50';
+				roundRect(ctx, r.x + pad + 4, r.y + pad + 4, barW, 4, 2); ctx.fill();
+			}
+
+			if (r.w > 50 && r.h > 30) {
+				ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold ' + Math.min(14, Math.max(9, r.w / 12)) + 'px system-ui'; ctx.textAlign = 'left';
+				const name = item.node.name.length > Math.floor(r.w / 8) ? item.node.name.slice(0, Math.floor(r.w / 8) - 1) + '\u2026' : item.node.name;
+				ctx.fillText(name, r.x + pad + 6, r.y + pad + 22);
+				ctx.fillStyle = '#94a3b8'; ctx.font = Math.min(11, Math.max(7, r.w / 14)) + 'px system-ui';
+				ctx.fillText(item.node.certCount.toLocaleString() + ' certs', r.x + pad + 6, r.y + pad + 36);
+				if (rr > 0.001 && r.h > 50) {
+					ctx.fillStyle = '#f87171';
+					ctx.fillText((rr * 100).toFixed(1) + '% revoked', r.x + pad + 6, r.y + pad + 49);
+				}
+			}
+
+			segments.push({type:'rect',x:r.x+pad,y:r.y+pad,w:r.w-pad*2,h:r.h-pad*2,node:item.node});
+		});
+	}
+
+	// ─── LEAF GRID ───
+	function drawLeafGrid() {
+		const W = canvas.width / devicePixelRatio, H = canvas.height / devicePixelRatio;
+		segments = [];
+
+		if (!currentNode._certs || !currentNode._certs.length) {
+			ctx.fillStyle = '#94a3b8'; ctx.textAlign = 'center'; ctx.font = '13px system-ui';
+			ctx.fillText(currentNode.certCount > 0 ? 'Loading certificates...' : 'No certificates at this level', W / 2, H / 2);
+
+			if (currentNode.certCount > 0 && !currentNode._loading) {
+				currentNode._loading = true;
+				loadLeafCerts();
+			}
+			return;
+		}
+
+		const certs = currentNode._certs;
+		const pad = 12;
+		const area = (W - pad * 2) * (H - pad * 2);
+		const dotSize = Math.max(3, Math.min(16, Math.sqrt(area / certs.length) * 0.75));
+		const cols = Math.floor((W - pad * 2) / (dotSize + 2));
+
+		certs.forEach((cert, i) => {
+			const col = i % cols, row = Math.floor(i / cols);
+			const x = pad + col * (dotSize + 2);
+			const y = pad + row * (dotSize + 2);
+			if (y + dotSize > H) return;
+			const cc = certDotColor(cert);
+			const rev = cert.revoked;
+
+			ctx.fillStyle = cc.fill; ctx.strokeStyle = cc.stroke; ctx.lineWidth = rev ? 2 : 0.5;
+			ctx.beginPath(); ctx.roundRect(x, y, dotSize, dotSize, 2); ctx.fill(); ctx.stroke();
+
+			if (rev && dotSize > 5) {
+				ctx.strokeStyle = '#f87171'; ctx.lineWidth = 1.5;
+				ctx.beginPath(); ctx.moveTo(x + 2, y + 2); ctx.lineTo(x + dotSize - 2, y + dotSize - 2);
+				ctx.moveTo(x + dotSize - 2, y + 2); ctx.lineTo(x + 2, y + dotSize - 2); ctx.stroke();
+			}
+
+			segments.push({type:'rect',x,y,w:dotSize,h:dotSize,node:null,cert});
+		});
+	}
+
+	async function loadLeafCerts() {
+		const path = drillPath.map(n => n.name);
+		const ca = path[1] || '';
+		const batch = path[2] || '';
+		const algo = path[3] || '';
+		const params = new URLSearchParams({ca, batch, algo, page: '1'});
+		try {
+			const res = await fetch('/admin/viz/certificates?' + params);
+			const data = await res.json();
+			currentNode._certs = data.certificates || [];
+			currentNode._loading = false;
+			redraw();
+			renderSidePanel(currentNode);
+		} catch (err) {
+			console.error('Failed to load leaf certs:', err);
+			currentNode._loading = false;
+		}
+	}
+
+	// ─── SQUARIFY ───
+	function squarify(values, rect) {
+		const total = values.reduce((s, v) => s + v, 0);
+		const rects = [];
+		let remaining = [...values.map((v, i) => ({v, i}))];
+		let {x, y, w, h} = rect;
+
+		while (remaining.length) {
+			const isWide = w >= h;
+			const side = isWide ? h : w;
+			let row = [], rowSum = 0;
+			const areaLeft = remaining.reduce((s, r) => s + r.v, 0);
+
+			for (let i = 0; i < remaining.length; i++) {
+				const test = [...row, remaining[i]];
+				const testSum = rowSum + remaining[i].v;
+				const testArea = (testSum / total) * (rect.w * rect.h);
+				const rowLen = testArea / side;
+				const worst = Math.max(...test.map(t => {
+					const s = (t.v / testSum) * side;
+					return Math.max(rowLen / s, s / rowLen);
+				}));
+				if (row.length && worst > Math.max(...row.map(t => {
+					const s = (t.v / rowSum) * side;
+					const rl = (rowSum / total) * (rect.w * rect.h) / side;
+					return Math.max(rl / s, s / rl);
+				}))) { break; }
+				row.push(remaining[i]); rowSum += remaining[i].v;
+			}
+
+			const rowArea = (rowSum / areaLeft) * (w * h);
+			const rowLen = isWide ? rowArea / h : rowArea / w;
+			let offset = 0;
+			row.forEach(item => {
+				const frac = item.v / rowSum;
+				const s = frac * side;
+				if (isWide) { rects[item.i] = {x, y: y + offset, w: rowLen, h: s}; }
+				else { rects[item.i] = {x: x + offset, y, w: s, h: rowLen}; }
+				offset += s;
+			});
+
+			remaining = remaining.slice(row.length);
+			if (isWide) { x += rowLen; w -= rowLen; }
+			else { y += rowLen; h -= rowLen; }
+		}
+		return rects;
+	}
+
+	function roundRect(c, x, y, w, h, r) {
+		c.beginPath(); c.roundRect(x, y, w, h, r);
+	}
+
+	// ─── RENDER ───
+	function resizeCanvas() {
+		const panel = document.getElementById('vizPanel');
+		canvas.width = panel.clientWidth * devicePixelRatio;
+		canvas.height = panel.clientHeight * devicePixelRatio;
+		canvas.style.width = panel.clientWidth + 'px';
+		canvas.style.height = panel.clientHeight + 'px';
+		ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+	}
+
+	function redraw() {
+		resizeCanvas();
+		ctx.clearRect(0, 0, canvas.width, canvas.height);
+		if (viewMode === 'proof') {
+			drawProofTree();
+			renderProofLegend();
+			return;
+		}
+		if (!hierarchy) return;
+		if (viewMode === 'sunburst') drawSunburst();
+		else drawTreemap();
+		renderLegend();
+	}
+
+	function renderStats() {
+		if (!vizStats) return;
+		const s = vizStats;
+		document.getElementById('statsBar').innerHTML =
+			'<div class="st"><div class="v b">' + s.total.toLocaleString() + '</div>Total Certs</div>' +
+			'<div class="st"><div class="v g">' + s.valid.toLocaleString() + '</div>Valid</div>' +
+			'<div class="st"><div class="v r">' + s.revoked.toLocaleString() + '</div>Revoked</div>' +
+			'<div class="st"><div class="v p">' + s.pqCount.toLocaleString() + '</div>Post-Quantum</div>' +
+			'<div class="st"><div class="v">' + s.caCount + '</div>CAs</div>' +
+			'<div class="st"><div class="v">' + (s.revocationRate * 100).toFixed(2) + '%</div>Revocation Rate</div>' +
+			'<div class="st"><div class="v g">' + ((s.coverageRate || 0) * 100).toFixed(1) + '%</div>Assertion Coverage</div>';
+	}
+
+	function renderBreadcrumb() {
+		document.getElementById('breadcrumb').innerHTML = drillPath.map((n, i) => {
+			const isCurrent = i === drillPath.length - 1;
+			return (i > 0 ? '<span class="crumb-sep">\u203a</span>' : '') +
+				'<span class="crumb ' + (isCurrent ? 'current' : '') + '" onclick="drillTo(' + i + ')">' + n.name + '</span>';
+		}).join('');
+	}
+
+	function renderLegend() {
+		const mode = document.getElementById('colorMode').value;
+		let items = [];
+		if (mode === 'status') {
+			items = [{c:'#34d399',l:'Valid'},{c:'#f87171',l:'Revoked'}];
+		} else if (mode === 'algorithm') {
+			items = [{c:'#a78bfa',l:'Post-Quantum (ML-DSA)'},{c:'#60a5fa',l:'Classical (ECDSA/Ed25519/RSA)'}];
+		} else if (mode === 'assertion') {
+			items = [{c:'#22c55e',l:'Fresh (>80%)'},{c:'#f59e0b',l:'Stale (>30%)'},{c:'#ef4444',l:'Missing (>50%)'},{c:'#3b82f6',l:'Mixed'}];
+		} else {
+			items = [{c:'#34d399',l:'Fresh (0 days)'},{c:'#f59e0b',l:'Mid-life (~7 days)'},{c:'#f87171',l:'Expiring (~14 days)'}];
+		}
+		if (mode !== 'assertion') items.push({c:'#a78bfa40',l:'PQ Ratio (outer ring / top bar)'});
+		document.getElementById('legendRow').innerHTML = items.map(i =>
+			'<div class="leg"><div class="leg-c" style="background:' + i.c + '"></div>' + i.l + '</div>'
+		).join('');
+	}
+
+	function renderSidePanel(node, cert) {
+		const title = document.getElementById('sideTitle');
+		const content = document.getElementById('sideContent');
+
+		if (cert) {
+			title.textContent = 'Certificate Detail';
+			const rev = cert.revoked;
+			content.innerHTML = '<div class="detail-card ' + (rev ? 'rev' : '') + '">' +
+				'<div class="domain">' + (cert.commonName || cert.serialHex || 'Certificate #' + cert.index) + '</div>' +
+				'<div class="meta">' +
+				'CA: ' + (cert.ca || 'Unknown') + '<br>' +
+				'Algorithm: ' + (cert.algorithm || 'Unknown') + ' ' + (cert.isPQ ? '(Post-Quantum)' : '(Classical)') + '<br>' +
+				'Issued: ' + (cert.issuedAt || 'Unknown') + '<br>' +
+				'Batch: ' + (cert.batchWindow || 'Unknown') + '<br>' +
+				'Index: #' + cert.index +
+				'</div>' +
+				'<span class="tag ' + (rev ? 'revoked' : 'valid') + '">' + (rev ? 'REVOKED' : 'VALID') + '</span> ' +
+				'<span class="tag ' + (cert.isPQ ? 'pq' : 'classical') + '">' + (cert.isPQ ? 'Post-Quantum' : 'Classical') + '</span>' +
+				'<div style="margin-top:8px"><a href="/admin/certs/' + cert.index + '" style="color:#38bdf8;font-size:.8rem">View full details \u2192</a></div>' +
+				'</div>';
+			return;
+		}
+
+		if (!node || node === hierarchy) {
+			title.textContent = 'Overview';
+			if (!hierarchy || !hierarchy.children || !hierarchy.children.length) {
+				content.innerHTML = '<div style="color:#64748b;padding:20px;text-align:center">No certificate data available yet.<br>Certificates will appear here as they are processed.</div>';
+				return;
+			}
+			// Revocation summary card at the top
+			const totalRev = hierarchy.revokedCount;
+			const totalCerts = hierarchy.certCount;
+			const revPct = totalCerts ? ((totalRev / totalCerts) * 100).toFixed(2) : '0.00';
+			let html = '<div style="background:#1c1017;border:1px solid #991b1b;border-radius:10px;padding:14px;margin-bottom:12px">' +
+				'<div style="display:flex;justify-content:space-between;align-items:center">' +
+				'<div><div style="color:#f87171;font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em">Revocations</div>' +
+				'<div style="font-size:1.5rem;font-weight:700;color:#f87171">' + totalRev.toLocaleString() + '</div></div>' +
+				'<div style="text-align:right"><div style="color:#64748b;font-size:.72rem">' + revPct + '% of ' + totalCerts.toLocaleString() + '</div>' +
+				'<div style="width:80px;height:6px;background:#1e293b;border-radius:3px;margin-top:4px;overflow:hidden">' +
+				'<div style="width:' + Math.max(1, Math.min(100, parseFloat(revPct))) + '%;height:100%;background:#f87171;border-radius:3px"></div></div></div></div>';
+			// Per-CA revocation breakdown
+			const casSorted = [...hierarchy.children].filter(g => g.revokedCount > 0).sort((a, b) => b.revokedCount - a.revokedCount);
+			if (casSorted.length) {
+				html += '<div style="margin-top:10px">';
+				casSorted.forEach(g => {
+					const pct = g.certCount ? ((g.revokedCount / g.certCount) * 100).toFixed(1) : 0;
+					html += '<div style="display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:.75rem">' +
+						'<span style="color:#e2e8f0">' + g.name + '</span>' +
+						'<span style="color:#f87171;font-weight:600">' + g.revokedCount + ' (' + pct + '%)</span></div>';
+				});
+				html += '</div>';
+			}
+			html += '</div>';
+			// Assertion coverage summary
+			const freshC = hierarchy.freshCount || 0;
+			const staleC = hierarchy.staleCount || 0;
+			const missingC = hierarchy.missingCount || 0;
+			const covPct = totalCerts ? ((freshC / totalCerts) * 100).toFixed(1) : '0.0';
+			html += '<div style="background:#0c1a10;border:1px solid #166534;border-radius:10px;padding:14px;margin-bottom:12px">' +
+				'<div style="display:flex;justify-content:space-between;align-items:center">' +
+				'<div><div style="color:#22c55e;font-size:.75rem;font-weight:600;text-transform:uppercase;letter-spacing:.05em">Assertion Coverage</div>' +
+				'<div style="font-size:1.5rem;font-weight:700;color:#22c55e">' + covPct + '%</div></div>' +
+				'<div style="text-align:right;font-size:.72rem;color:#64748b">' +
+				'<div style="color:#22c55e">' + freshC.toLocaleString() + ' fresh</div>' +
+				'<div style="color:#f59e0b">' + staleC.toLocaleString() + ' stale</div>' +
+				'<div style="color:#ef4444">' + missingC.toLocaleString() + ' missing</div>' +
+				'</div></div></div>';
+
+			// CA overview cards
+			html += '<h3 style="color:#94a3b8;margin:8px 0 6px;font-size:.78rem">Certificate Authorities</h3>';
+			html += hierarchy.children.sort((a, b) => b.certCount - a.certCount).map(g => {
+				const rr = g.certCount ? ((g.revokedCount / g.certCount) * 100).toFixed(1) : 0;
+				return '<div class="detail-card" style="border-left-color:' + g.color + '">' +
+					'<div class="domain">' + g.name + '</div>' +
+					'<div class="meta">' + g.certCount.toLocaleString() + ' certs \u00b7 ' + g.pqCount + ' PQ \u00b7 ' + rr + '% revoked</div>' +
+					(g.revokedCount ? '<span class="tag revoked">' + g.revokedCount + ' revoked</span> ' : '<span class="tag valid">Clean</span> ') +
+					(g.pqCount ? '<span class="tag pq">' + ((g.pqCount / g.certCount) * 100).toFixed(0) + '% PQ</span>' : '') +
+					'</div>';
+			}).join('');
+			content.innerHTML = html;
+			return;
+		}
+
+		title.textContent = node.name;
+		let html = '<div class="detail-card">' +
+			'<div class="domain">' + node.name + '</div>' +
+			'<div class="meta">' + node.certCount.toLocaleString() + ' certificates<br>' +
+			node.revokedCount + ' revoked (' + (node.certCount ? ((node.revokedCount / node.certCount) * 100).toFixed(1) : 0) + '%)<br>' +
+			node.pqCount + ' post-quantum (' + (node.certCount ? ((node.pqCount / node.certCount) * 100).toFixed(0) : 0) + '%)</div>' +
+			'</div>';
+
+		if (node.children && node.children.length) {
+			html += '<h3 style="color:#94a3b8;margin:10px 0 6px;font-size:.8rem">Children (' + node.children.length + ')</h3>';
+			node.children.sort((a, b) => b.certCount - a.certCount).slice(0, 20).forEach(ch => {
+				html += '<div class="detail-card" style="border-left-color:' + ch.color + ';cursor:pointer" onclick="drillIntoByName(\'' + ch.name.replace(/'/g, "\\'") + '\')">' +
+					'<div class="domain">' + ch.name + '</div>' +
+					'<div class="meta">' + ch.certCount.toLocaleString() + ' certs \u00b7 ' + ch.revokedCount + ' revoked</div></div>';
+			});
+		}
+		content.innerHTML = html;
+	}
+
+	// ─── INTERACTION ───
+	canvas.addEventListener('click', e => {
+		const rect = canvas.getBoundingClientRect();
+		const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+		for (const seg of segments) {
+			if (seg.type === 'rect') {
+				if (mx >= seg.x && mx <= seg.x + seg.w && my >= seg.y && my <= seg.y + seg.h) {
+					if (seg.cert) { renderSidePanel(null, seg.cert); return; }
+					if (seg.node && seg.node.children && seg.node.children.length) {
+						currentNode = seg.node; drillPath.push(seg.node);
+						renderBreadcrumb(); redraw(); renderSidePanel(seg.node);
+						return;
+					}
+					if (seg.node) { renderSidePanel(seg.node); return; }
+				}
+			} else if (seg.type === 'arc') {
+				const dx = mx - seg.cx, dy = my - seg.cy;
+				const dist = Math.sqrt(dx * dx + dy * dy);
+				let a = Math.atan2(dy, dx);
+				if (dist >= seg.r1 && dist <= seg.r2) {
+					let sa = seg.startAngle;
+					while (a < sa) a += Math.PI * 2;
+					if (a <= seg.endAngle) {
+						if (seg.node.children && seg.node.children.length) {
+							currentNode = seg.node; drillPath.push(seg.node);
+							renderBreadcrumb(); redraw(); renderSidePanel(seg.node);
+						} else { renderSidePanel(seg.node); }
+						return;
+					}
+				}
+			}
+		}
+	});
+
+	canvas.addEventListener('mousemove', e => {
+		const rect = canvas.getBoundingClientRect();
+		const mx = e.clientX - rect.left, my = e.clientY - rect.top;
+		const tip = document.getElementById('tip');
+		let found = false;
+
+		// Handle proof explorer tooltips
+		if (viewMode === 'proof' && proofData) {
+			for (const seg of proofSegments) {
+				if (mx >= seg.x && mx <= seg.x + seg.w && my >= seg.y && my <= seg.y + seg.h) {
+					found = true;
+					canvas.style.cursor = 'pointer';
+					tip.innerHTML = '<strong>' + seg.label + '</strong>' +
+						(seg.hash ? '<br><span style="font-family:monospace;font-size:.75rem;color:#60a5fa">' + seg.hash + '</span>' : '<br><em style="color:#64748b">Intermediate computed hash</em>');
+					tip.style.display = 'block';
+					tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 380) + 'px';
+					tip.style.top = (e.clientY - 10) + 'px';
+					break;
+				}
+			}
+			if (!found) { canvas.style.cursor = 'default'; tip.style.display = 'none'; }
+			return;
+		}
+
+		for (const seg of segments) {
+			let hit = false;
+			if (seg.type === 'rect') {
+				hit = mx >= seg.x && mx <= seg.x + seg.w && my >= seg.y && my <= seg.y + seg.h;
+			} else if (seg.type === 'arc') {
+				const dx = mx - seg.cx, dy = my - seg.cy;
+				const dist = Math.sqrt(dx * dx + dy * dy);
+				let a = Math.atan2(dy, dx);
+				if (dist >= seg.r1 && dist <= seg.r2) {
+					while (a < seg.startAngle) a += Math.PI * 2;
+					hit = a <= seg.endAngle;
+				}
+			}
+			if (hit) {
+				found = true;
+				canvas.style.cursor = 'pointer';
+				let html = '';
+				if (seg.cert) {
+					const c = seg.cert;
+					html = '<strong>' + (c.commonName || 'Cert #' + c.index) + '</strong><br>' + (c.ca || '') + ' \u00b7 ' + (c.algorithm || '') +
+						'<br>' + (c.revoked ? '<span style="color:#f87171">REVOKED</span>' : '<span style="color:#34d399">Valid</span>');
+				} else if (seg.node) {
+					const n = seg.node;
+					html = '<strong>' + n.name + '</strong><br>' + n.certCount.toLocaleString() + ' certs \u00b7 ' + n.revokedCount + ' revoked (' + (n.certCount ? ((n.revokedCount / n.certCount) * 100).toFixed(1) : 0) + '%)' +
+						'<br>' + n.pqCount + ' post-quantum' +
+						(n.children && n.children.length ? '<br><em style="color:#64748b">Click to drill down</em>' : '');
+				}
+				tip.innerHTML = html;
+				tip.style.display = 'block';
+				tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 380) + 'px';
+				tip.style.top = (e.clientY - 10) + 'px';
+				break;
+			}
+		}
+		if (!found) { canvas.style.cursor = 'default'; tip.style.display = 'none'; }
+	});
+	canvas.addEventListener('mouseleave', () => { document.getElementById('tip').style.display = 'none'; });
+
+	// ─── ACTIONS ───
+	function switchView(v) {
+		viewMode = v;
+		document.getElementById('tabSunburst').classList.toggle('active', v === 'sunburst');
+		document.getElementById('tabTreemap').classList.toggle('active', v === 'treemap');
+		document.getElementById('tabProof').classList.toggle('active', v === 'proof');
+		// Show/hide proof search controls
+		const proofControls = document.getElementById('proofControls');
+		const vizControls = document.getElementById('vizControls');
+		if (v === 'proof') {
+			proofControls.style.display = 'flex';
+			vizControls.style.display = 'none';
+		} else {
+			proofControls.style.display = 'none';
+			vizControls.style.display = '';
+		}
+		redraw();
+	}
+	function drillUp() {
+		if (drillPath.length > 1) {
+			drillPath.pop(); currentNode = drillPath[drillPath.length - 1];
+			renderBreadcrumb(); redraw(); renderSidePanel(currentNode);
+		}
+	}
+	function drillTo(idx) {
+		drillPath = drillPath.slice(0, idx + 1); currentNode = drillPath[drillPath.length - 1];
+		renderBreadcrumb(); redraw(); renderSidePanel(currentNode);
+	}
+	function drillIntoByName(name) {
+		const child = (currentNode.children || []).find(ch => ch.name === name);
+		if (child) {
+			currentNode = child; drillPath.push(child);
+			renderBreadcrumb(); redraw(); renderSidePanel(child);
+		}
+	}
+	function resetView() {
+		currentNode = hierarchy; drillPath = [hierarchy];
+		renderBreadcrumb(); redraw(); renderSidePanel(null);
+	}
+	function toggleRevokedHighlight() {
+		highlightRevoked = !highlightRevoked;
+		const btn = document.getElementById('btnRevoked');
+		if (highlightRevoked) {
+			btn.style.background = '#991b1b';
+			btn.style.color = '#f87171';
+			btn.style.borderColor = '#f87171';
+			btn.style.fontWeight = '600';
+		} else {
+			btn.style.background = '';
+			btn.style.color = '#f87171';
+			btn.style.borderColor = '#f87171';
+			btn.style.fontWeight = '';
+		}
+		redraw();
+	}
+
+	// ─── PROOF EXPLORER ───
+	async function loadProof() {
+		const input = document.getElementById('proofIndex');
+		const idx = parseInt(input.value, 10);
+		if (isNaN(idx) || idx < 0) {
+			document.getElementById('proofStatus').textContent = 'Please enter a valid leaf index';
+			return;
+		}
+		document.getElementById('proofStatus').textContent = 'Loading proof...';
+		try {
+			const res = await fetch('/admin/viz/proof/' + idx);
+			if (!res.ok) {
+				const text = await res.text();
+				document.getElementById('proofStatus').textContent = text || 'Failed to load proof';
+				proofData = null;
+				redraw();
+				return;
+			}
+			proofData = await res.json();
+			document.getElementById('proofStatus').textContent = '';
+			redraw();
+			renderProofSidePanel();
+		} catch (err) {
+			document.getElementById('proofStatus').textContent = 'Error: ' + err.message;
+			proofData = null;
+			redraw();
+		}
+	}
+
+	function drawProofTree() {
+		const W = canvas.width / devicePixelRatio, H = canvas.height / devicePixelRatio;
+		proofSegments = [];
+
+		if (!proofData) {
+			ctx.fillStyle = '#94a3b8'; ctx.textAlign = 'center'; ctx.font = '14px system-ui';
+			ctx.fillText('Enter a leaf index above and click "Show Proof" to explore the Merkle inclusion proof', W / 2, H / 2 - 10);
+			ctx.fillStyle = '#64748b'; ctx.font = '12px system-ui';
+			ctx.fillText('The proof path from leaf to root will be rendered as an interactive binary tree', W / 2, H / 2 + 14);
+			return;
+		}
+
+		const depth = proofData.proofPath.length;
+		if (depth === 0) {
+			ctx.fillStyle = '#94a3b8'; ctx.textAlign = 'center'; ctx.font = '14px system-ui';
+			ctx.fillText('Tree has only one entry — no proof path needed', W / 2, H / 2);
+			return;
+		}
+
+		const topPad = 40, bottomPad = 40;
+		const levelHeight = (H - topPad - bottomPad) / depth;
+		const nodeRadius = Math.min(22, Math.max(14, W / (depth * 4)));
+
+		// Draw from root (top) to leaf (bottom)
+		// Proof path: proofPath[0] is the sibling at the leaf level,
+		// proofPath[depth-1] is the sibling at the level just below root.
+		// proofSides[i] tells whether the proof hash is "left" or "right" of the path node.
+
+		// At each level (from leaf to root), we draw two nodes:
+		// 1. The path node (the node in the inclusion path)
+		// 2. The proof sibling node
+		// Then connect them to their parent at the level above.
+
+		const levels = depth + 1; // including root at top and leaf at bottom
+		const nodePositions = []; // [{pathX, pathY, sibX, sibY}] indexed by level (0 = root, depth = leaf)
+
+		for (let i = 0; i < levels; i++) {
+			const y = topPad + i * levelHeight;
+			// Horizontal spread narrows as we go up (root is centered)
+			const spread = Math.min(W * 0.4, 60 + (i / depth) * (W * 0.35));
+			const cx = W / 2;
+
+			if (i === 0) {
+				// Root level — only the path node (root hash)
+				nodePositions.push({pathX: cx, pathY: y, sibX: null, sibY: null});
+			} else {
+				// At proof level i-1 (0-indexed from leaf), we have the sibling
+				const proofIdx = depth - i; // map tree level to proof array index
+				const side = proofData.proofSides[proofIdx]; // "left" or "right"
+				// Path node and sibling positions
+				const leftX = cx - spread;
+				const rightX = cx + spread;
+				if (side === 'left') {
+					// Proof hash is the left sibling, path node is on the right
+					nodePositions.push({pathX: rightX, pathY: y, sibX: leftX, sibY: y});
+				} else {
+					// Proof hash is the right sibling, path node is on the left
+					nodePositions.push({pathX: leftX, pathY: y, sibX: rightX, sibY: y});
+				}
+			}
+		}
+
+		// Draw connecting lines first (behind nodes)
+		ctx.lineWidth = 2;
+		for (let i = 1; i < levels; i++) {
+			const parent = nodePositions[i - 1];
+			const current = nodePositions[i];
+
+			// Line from parent path node to current path node
+			ctx.strokeStyle = '#22c55e60';
+			ctx.beginPath();
+			ctx.moveTo(parent.pathX, parent.pathY + nodeRadius);
+			ctx.lineTo(current.pathX, current.pathY - nodeRadius);
+			ctx.stroke();
+
+			// Line from parent path node to sibling node
+			if (current.sibX !== null) {
+				ctx.strokeStyle = '#334155';
+				ctx.beginPath();
+				ctx.moveTo(parent.pathX, parent.pathY + nodeRadius);
+				ctx.lineTo(current.sibX, current.sibY - nodeRadius);
+				ctx.stroke();
+			}
+		}
+
+		// Draw nodes
+		for (let i = 0; i < levels; i++) {
+			const pos = nodePositions[i];
+			const isRoot = i === 0;
+			const isLeaf = i === levels - 1;
+
+			// Path node (green)
+			let pathHash;
+			if (isRoot) {
+				pathHash = proofData.rootHash;
+			} else if (isLeaf) {
+				pathHash = proofData.leafHash;
+			} else {
+				pathHash = null; // intermediate — computed hash, not directly available
+			}
+
+			drawProofNode(pos.pathX, pos.pathY, nodeRadius, '#22c55e', pathHash,
+				isRoot ? 'Root' : isLeaf ? 'Leaf #' + proofData.leafIndex : 'Path',
+				isRoot || isLeaf);
+
+			// Sibling node (blue = proof hash)
+			if (pos.sibX !== null) {
+				const proofIdx = depth - i;
+				const sibHash = proofData.proofPath[proofIdx];
+				drawProofNode(pos.sibX, pos.sibY, nodeRadius, '#3b82f6', sibHash, 'Proof[' + proofIdx + ']', false);
+
+				proofSegments.push({x: pos.sibX - nodeRadius, y: pos.sibY - nodeRadius,
+					w: nodeRadius * 2, h: nodeRadius * 2, hash: sibHash, label: 'Proof Hash [Level ' + proofIdx + ']'});
+			}
+
+			proofSegments.push({x: pos.pathX - nodeRadius, y: pos.pathY - nodeRadius,
+				w: nodeRadius * 2, h: nodeRadius * 2, hash: pathHash,
+				label: isRoot ? 'Root Hash' : isLeaf ? 'Leaf Hash (index ' + proofData.leafIndex + ')' : 'Intermediate Path Node'});
+		}
+
+		// Labels
+		ctx.fillStyle = '#475569'; ctx.font = '10px system-ui'; ctx.textAlign = 'center';
+		ctx.fillText('Tree Size: ' + proofData.treeSize.toLocaleString() + '  |  Proof Depth: ' + depth + '  |  Leaf Index: ' + proofData.leafIndex, W / 2, H - 12);
+	}
+
+	function drawProofNode(x, y, r, color, hash, label, highlight) {
+		// Glow for highlighted nodes
+		if (highlight) {
+			ctx.beginPath(); ctx.arc(x, y, r + 4, 0, Math.PI * 2);
+			ctx.fillStyle = color + '20'; ctx.fill();
+		}
+		// Node circle
+		ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+		ctx.fillStyle = color + '30'; ctx.fill();
+		ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+		// Hash text (truncated)
+		if (hash) {
+			ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center';
+			ctx.fillText(hash.substring(0, 8), x, y + 1);
+		}
+		// Label below
+		ctx.fillStyle = '#64748b'; ctx.font = '9px system-ui'; ctx.textAlign = 'center';
+		ctx.fillText(label, x, y + r + 12);
+	}
+
+	function renderProofLegend() {
+		const items = [
+			{c:'#22c55e',l:'Inclusion Path (leaf \u2192 root)'},
+			{c:'#3b82f6',l:'Proof Hashes (siblings)'},
+		];
+		document.getElementById('legendRow').innerHTML = items.map(i =>
+			'<div class="leg"><div class="leg-c" style="background:' + i.c + '"></div>' + i.l + '</div>'
+		).join('');
+	}
+
+	function renderProofSidePanel() {
+		const title = document.getElementById('sideTitle');
+		const content = document.getElementById('sideContent');
+		if (!proofData) {
+			title.textContent = 'Proof Explorer';
+			content.innerHTML = '<div style="color:#64748b;padding:20px;text-align:center">Enter a leaf index to view its Merkle inclusion proof.</div>';
+			return;
+		}
+
+		title.textContent = 'Inclusion Proof';
+		let html = '<div class="detail-card" style="border-left-color:#22c55e">' +
+			'<div class="domain">Leaf #' + proofData.leafIndex + '</div>' +
+			'<div class="meta">' +
+			'Tree Size: ' + proofData.treeSize.toLocaleString() + '<br>' +
+			'Proof Depth: ' + proofData.proofPath.length + '<br>' +
+			'<a href="/admin/certs/' + proofData.leafIndex + '" style="color:#38bdf8">View certificate \u2192</a>' +
+			'</div></div>';
+
+		html += '<div class="detail-card" style="border-left-color:#22c55e">' +
+			'<div style="font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Leaf Hash</div>' +
+			'<div style="font-family:monospace;font-size:.72rem;color:#34d399;word-break:break-all">' + proofData.leafHash + '</div></div>';
+
+		html += '<div class="detail-card" style="border-left-color:#a78bfa">' +
+			'<div style="font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Root Hash</div>' +
+			'<div style="font-family:monospace;font-size:.72rem;color:#a78bfa;word-break:break-all">' + proofData.rootHash + '</div></div>';
+
+		if (proofData.proofPath.length) {
+			html += '<div style="margin:10px 0 6px;font-size:.78rem;color:#94a3b8;font-weight:600">Proof Path (' + proofData.proofPath.length + ' hashes)</div>';
+			proofData.proofPath.forEach((h, i) => {
+				const side = proofData.proofSides[i];
+				html += '<div class="detail-card" style="border-left-color:#3b82f6;padding:8px 12px">' +
+					'<div style="display:flex;justify-content:space-between;align-items:center">' +
+					'<span style="color:#94a3b8;font-size:.7rem">Level ' + i + ' (' + side + ')</span>' +
+					'</div>' +
+					'<div style="font-family:monospace;font-size:.68rem;color:#60a5fa;word-break:break-all;margin-top:2px">' + h + '</div></div>';
+			});
+		}
+
+		content.innerHTML = html;
+	}
+
+	// Keyboard shortcuts
+	document.addEventListener('keydown', e => {
+		if (e.key === 'Escape') { if (viewMode === 'proof') return; drillUp(); }
+		if (e.key === 'Backspace' && !e.target.matches('input,textarea')) { e.preventDefault(); resetView(); }
+	});
+
+	// Init
+	window.addEventListener('resize', redraw);
+	loadData();
+	</script>
 </body>
 </html>`

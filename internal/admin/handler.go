@@ -5,6 +5,7 @@
 package admin
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -15,9 +16,12 @@ import (
 	"strconv"
 	"time"
 
+	"math/bits"
+
 	"github.com/briantrzupek/ca-extension-merkle/internal/assertion"
 	"github.com/briantrzupek/ca-extension-merkle/internal/assertionissuer"
 	"github.com/briantrzupek/ca-extension-merkle/internal/certutil"
+	"github.com/briantrzupek/ca-extension-merkle/internal/merkle"
 	"github.com/briantrzupek/ca-extension-merkle/internal/store"
 	"github.com/briantrzupek/ca-extension-merkle/internal/watcher"
 )
@@ -31,10 +35,11 @@ type Handler struct {
 	logger    *slog.Logger
 	tmpl      *template.Template
 	mux       *http.ServeMux
+	caNames   map[string]string
 }
 
 // New creates a new admin Handler.
-func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOrigin string, logger *slog.Logger) (*Handler, error) {
+func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOrigin string, caNames map[string]string, logger *slog.Logger) (*Handler, error) {
 	funcMap := template.FuncMap{
 		"formatTime": func(t time.Time) string {
 			if t.IsZero() {
@@ -71,6 +76,7 @@ func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOri
 		logger:    logger,
 		tmpl:      tmpl,
 		mux:       http.NewServeMux(),
+		caNames:   caNames,
 	}
 
 	h.mux.HandleFunc("GET /admin", h.handleDashboard)
@@ -82,6 +88,12 @@ func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOri
 	h.mux.HandleFunc("GET /admin/certs", h.handleCerts)
 	h.mux.HandleFunc("GET /admin/certs/search", h.handleCertSearch)
 	h.mux.HandleFunc("GET /admin/certs/{index}", h.handleCertDetail)
+	h.mux.HandleFunc("GET /admin/viz", h.handleVisualization)
+	h.mux.HandleFunc("GET /admin/viz/summary", h.handleVizSummary)
+	h.mux.HandleFunc("GET /admin/viz/certificates", h.handleVizCertificates)
+	h.mux.HandleFunc("GET /admin/viz/revocations", h.handleVizRevocations)
+	h.mux.HandleFunc("GET /admin/viz/stats", h.handleVizStats)
+	h.mux.HandleFunc("GET /admin/viz/proof/{index}", h.handleVizProof)
 
 	return h, nil
 }
@@ -500,6 +512,181 @@ func truncateHash(h string) string {
 		return h[:32] + "..."
 	}
 	return h
+}
+
+// --- Visualization Handlers ---
+
+// handleVisualization serves the visualization explorer page.
+func (h *Handler) handleVisualization(w http.ResponseWriter, r *http.Request) {
+	// Trigger async metadata population on page load.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		for {
+			n, err := h.store.PopulateCertMetadata(ctx, h.caNames)
+			if err != nil {
+				h.logger.Error("admin: populate cert metadata", "error", err)
+				return
+			}
+			if n == 0 {
+				return
+			}
+			h.logger.Info("admin: populated cert metadata", "count", n)
+		}
+	}()
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprint(w, vizExplorerHTML)
+}
+
+// handleVizSummary returns the aggregated certificate hierarchy as JSON.
+func (h *Handler) handleVizSummary(w http.ResponseWriter, r *http.Request) {
+	summary, err := h.store.GetVizSummary(r.Context())
+	if err != nil {
+		h.logger.Error("admin: viz summary", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(summary)
+}
+
+// handleVizCertificates returns paginated leaf-level certificates as JSON.
+func (h *Handler) handleVizCertificates(w http.ResponseWriter, r *http.Request) {
+	ca := r.URL.Query().Get("ca")
+	batch := r.URL.Query().Get("batch")
+	algo := r.URL.Query().Get("algo")
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	limit := 500
+	offset := (page - 1) * limit
+
+	certs, total, err := h.store.GetVizCertificates(r.Context(), ca, batch, algo, limit, offset)
+	if err != nil {
+		h.logger.Error("admin: viz certificates", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"certificates": certs,
+		"total":        total,
+		"page":         page,
+		"pageSize":     limit,
+	})
+}
+
+// handleVizRevocations returns revoked entry indices as JSON.
+func (h *Handler) handleVizRevocations(w http.ResponseWriter, r *http.Request) {
+	indices, err := h.store.GetRevokedIndices(r.Context())
+	if err != nil {
+		h.logger.Error("admin: viz revocations", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"revokedIndices": indices,
+	})
+}
+
+// handleVizStats returns aggregate visualization statistics as JSON.
+func (h *Handler) handleVizStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.store.GetVizStats(r.Context())
+	if err != nil {
+		h.logger.Error("admin: viz stats", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
+}
+
+// handleVizProof returns the Merkle inclusion proof for a given leaf index.
+func (h *Handler) handleVizProof(w http.ResponseWriter, r *http.Request) {
+	idxStr := r.PathValue("index")
+	idx, err := strconv.ParseInt(idxStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid index", http.StatusBadRequest)
+		return
+	}
+
+	cp, err := h.store.LatestCheckpoint(r.Context())
+	if err != nil {
+		h.logger.Error("admin: viz proof: latest checkpoint", "error", err)
+		http.Error(w, "no checkpoint available", http.StatusServiceUnavailable)
+		return
+	}
+
+	if idx < 0 || idx >= cp.TreeSize {
+		http.Error(w, fmt.Sprintf("index %d out of range [0, %d)", idx, cp.TreeSize), http.StatusBadRequest)
+		return
+	}
+
+	detail, err := h.store.GetEntryDetail(r.Context(), idx)
+	if err != nil {
+		h.logger.Error("admin: viz proof: get entry", "error", err)
+		http.Error(w, "entry not found", http.StatusNotFound)
+		return
+	}
+
+	leafHash := merkle.LeafHash(detail.EntryData)
+
+	nodeAt := func(level int, nodeIdx int64) merkle.Hash {
+		nd, err := h.store.GetTreeNode(r.Context(), level, nodeIdx)
+		if err != nil {
+			return merkle.EmptyHash
+		}
+		return nd
+	}
+
+	proof, err := merkle.InclusionProofFromNodes(idx, cp.TreeSize, nodeAt)
+	if err != nil {
+		h.logger.Error("admin: viz proof: inclusion proof", "error", err)
+		http.Error(w, "failed to compute proof", http.StatusInternalServerError)
+		return
+	}
+
+	proofHex := make([]string, len(proof))
+	proofSides := make([]string, len(proof))
+	for i, ph := range proof {
+		proofHex[i] = hex.EncodeToString(ph[:])
+		// At level i of the proof, if bit i of index is 0, the sibling is on the right.
+		if (idx>>uint(i))&1 == 0 {
+			proofSides[i] = "right"
+		} else {
+			proofSides[i] = "left"
+		}
+	}
+
+	treeDepth := 0
+	if cp.TreeSize > 1 {
+		treeDepth = bits.Len64(uint64(cp.TreeSize - 1))
+	}
+
+	resp := struct {
+		LeafIndex  int64    `json:"leafIndex"`
+		TreeSize   int64    `json:"treeSize"`
+		LeafHash   string   `json:"leafHash"`
+		RootHash   string   `json:"rootHash"`
+		ProofPath  []string `json:"proofPath"`
+		ProofSides []string `json:"proofSides"`
+		TreeDepth  int      `json:"treeDepth"`
+	}{
+		LeafIndex:  idx,
+		TreeSize:   cp.TreeSize,
+		LeafHash:   hex.EncodeToString(leafHash[:]),
+		RootHash:   hex.EncodeToString(cp.RootHash),
+		ProofPath:  proofHex,
+		ProofSides: proofSides,
+		TreeDepth:  treeDepth,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // Suppress unused import warnings.

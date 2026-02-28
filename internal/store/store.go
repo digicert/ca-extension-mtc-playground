@@ -13,6 +13,9 @@ import (
 	"log/slog"
 	"time"
 
+	"strings"
+
+	"github.com/briantrzupek/ca-extension-merkle/internal/certutil"
 	"github.com/briantrzupek/ca-extension-merkle/internal/config"
 	"github.com/briantrzupek/ca-extension-merkle/internal/merkle"
 
@@ -178,6 +181,21 @@ var migrations = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_acme_challenges_authz ON acme_challenges(authz_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_acme_challenges_token ON acme_challenges(token)`,
+
+	// Phase 4: visualization cert_metadata cache table.
+	`CREATE TABLE IF NOT EXISTS cert_metadata (
+		entry_idx     BIGINT PRIMARY KEY REFERENCES log_entries(idx),
+		ca_cert_id    TEXT NOT NULL,
+		ca_name       TEXT NOT NULL DEFAULT '',
+		key_algorithm TEXT NOT NULL,
+		sig_algorithm TEXT NOT NULL,
+		common_name   TEXT NOT NULL DEFAULT '',
+		is_pq         BOOLEAN NOT NULL DEFAULT FALSE,
+		batch_window  TIMESTAMPTZ NOT NULL,
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_cert_metadata_ca ON cert_metadata(ca_cert_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_cert_metadata_batch ON cert_metadata(batch_window)`,
 }
 
 // --- Log Entries ---
@@ -1445,4 +1463,382 @@ func (s *Store) GetACMEChallengeByToken(ctx context.Context, token string) (*ACM
 	ch.ErrorType = errType.String
 	ch.ErrorDetail = errDetail.String
 	return &ch, nil
+}
+
+// --- Visualization Types ---
+
+// VizSummary is a hierarchical aggregation of certificate data for visualization.
+type VizSummary struct {
+	Name           string        `json:"name"`
+	Level          string        `json:"level"`
+	CertCount      int64         `json:"certCount"`
+	RevokedCount   int64         `json:"revokedCount"`
+	PQCount        int64         `json:"pqCount"`
+	ClassicalCount int64         `json:"classicalCount"`
+	FreshCount     int64         `json:"freshCount"`
+	StaleCount     int64         `json:"staleCount"`
+	MissingCount   int64         `json:"missingCount"`
+	Children       []*VizSummary `json:"children,omitempty"`
+	Color          string        `json:"color,omitempty"`
+}
+
+// VizCertificate is a leaf-level certificate for the visualization detail view.
+type VizCertificate struct {
+	Index        int64  `json:"index"`
+	SerialHex    string `json:"serialHex"`
+	CommonName   string `json:"commonName"`
+	CAName       string `json:"ca"`
+	KeyAlgorithm string `json:"algorithm"`
+	IsPQ         bool   `json:"isPQ"`
+	BatchWindow  string `json:"batchWindow"`
+	CreatedAt    string `json:"issuedAt"`
+	Revoked      bool   `json:"revoked"`
+}
+
+// VizStats holds aggregate statistics for the visualization stats bar.
+type VizStats struct {
+	Total        int64   `json:"total"`
+	Valid        int64   `json:"valid"`
+	Revoked      int64   `json:"revoked"`
+	PQCount      int64   `json:"pqCount"`
+	CACount      int64   `json:"caCount"`
+	RevRate      float64 `json:"revocationRate"`
+	FreshCount   int64   `json:"freshCount"`
+	StaleCount   int64   `json:"staleCount"`
+	MissingCount int64   `json:"missingCount"`
+	CoverageRate float64 `json:"coverageRate"`
+}
+
+// --- Visualization Methods ---
+
+// isPQAlgorithm returns true if the key algorithm name indicates a post-quantum algorithm.
+func isPQAlgorithm(keyAlgo string) bool {
+	upper := strings.ToUpper(keyAlgo)
+	for _, prefix := range []string{"ML-DSA", "ML-KEM", "SLH-DSA", "DILITHIUM", "KYBER", "SPHINCS", "FALCON"} {
+		if strings.Contains(upper, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// batchWindowTime truncates a timestamp to 6-hour intervals.
+func batchWindowTime(t time.Time) time.Time {
+	t = t.UTC()
+	hour := (t.Hour() / 6) * 6
+	return time.Date(t.Year(), t.Month(), t.Day(), hour, 0, 0, 0, time.UTC)
+}
+
+// vizCAColors is a palette of distinct colors for CA segments.
+var vizCAColors = []string{
+	"#34d399", "#38bdf8", "#818cf8", "#fbbf24",
+	"#fb923c", "#f472b6", "#a78bfa", "#22d3ee",
+	"#f87171", "#84cc16", "#e879f9", "#2dd4bf",
+}
+
+// vizCAColor returns a stable color for a CA name.
+func vizCAColor(name string) string {
+	var h uint32
+	for _, c := range name {
+		h = h*31 + uint32(c)
+	}
+	return vizCAColors[h%uint32(len(vizCAColors))]
+}
+
+// PopulateCertMetadata incrementally populates the cert_metadata cache table
+// by parsing DER certificates from log_entries that have no metadata yet.
+func (s *Store) PopulateCertMetadata(ctx context.Context, caNames map[string]string) (int64, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT le.idx, le.entry_data, le.ca_cert_id, le.created_at
+		 FROM log_entries le
+		 LEFT JOIN cert_metadata cm ON le.idx = cm.entry_idx
+		 WHERE le.entry_type = 1 AND cm.entry_idx IS NULL
+		 ORDER BY le.idx
+		 LIMIT 1000`)
+	if err != nil {
+		return 0, fmt.Errorf("store.PopulateCertMetadata: query: %w", err)
+	}
+	defer rows.Close()
+
+	type metaRow struct {
+		idx       int64
+		caCertID  string
+		caName    string
+		keyAlgo   string
+		sigAlgo   string
+		cn        string
+		isPQ      bool
+		batchWin  time.Time
+		createdAt time.Time
+	}
+
+	var pending []metaRow
+	for rows.Next() {
+		var idx int64
+		var entryData []byte
+		var caCertID string
+		var createdAt time.Time
+		if err := rows.Scan(&idx, &entryData, &caCertID, &createdAt); err != nil {
+			return 0, fmt.Errorf("store.PopulateCertMetadata: scan: %w", err)
+		}
+
+		meta, _, err := certutil.ParseLogEntry(entryData)
+		if err != nil {
+			s.logger.Warn("viz: skip unparseable entry", "idx", idx, "error", err)
+			continue
+		}
+
+		caName := caCertID
+		if name, ok := caNames[caCertID]; ok && name != "" {
+			caName = name
+		}
+
+		pending = append(pending, metaRow{
+			idx:       idx,
+			caCertID:  caCertID,
+			caName:    caName,
+			keyAlgo:   meta.KeyAlgorithm,
+			sigAlgo:   meta.SignatureAlgorithm,
+			cn:        meta.CommonName,
+			isPQ:      isPQAlgorithm(meta.KeyAlgorithm),
+			batchWin:  batchWindowTime(createdAt),
+			createdAt: createdAt,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("store.PopulateCertMetadata: rows: %w", err)
+	}
+
+	if len(pending) == 0 {
+		return 0, nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("store.PopulateCertMetadata: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO cert_metadata (entry_idx, ca_cert_id, ca_name, key_algorithm, sig_algorithm, common_name, is_pq, batch_window, created_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		 ON CONFLICT (entry_idx) DO NOTHING`)
+	if err != nil {
+		return 0, fmt.Errorf("store.PopulateCertMetadata: prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, r := range pending {
+		if _, err := stmt.ExecContext(ctx, r.idx, r.caCertID, r.caName, r.keyAlgo, r.sigAlgo, r.cn, r.isPQ, r.batchWin, r.createdAt); err != nil {
+			return 0, fmt.Errorf("store.PopulateCertMetadata: insert idx %d: %w", r.idx, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("store.PopulateCertMetadata: commit: %w", err)
+	}
+
+	return int64(len(pending)), nil
+}
+
+// GetVizSummary returns the aggregated certificate hierarchy for visualization.
+func (s *Store) GetVizSummary(ctx context.Context) (*VizSummary, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT cm.ca_name, cm.batch_window, cm.key_algorithm, cm.is_pq,
+		        COUNT(*) AS cert_count,
+		        COUNT(ri.entry_idx) AS revoked_count,
+		        COUNT(CASE WHEN ab.entry_idx IS NOT NULL AND ab.stale = FALSE THEN 1 END) AS fresh_count,
+		        COUNT(CASE WHEN ab.entry_idx IS NOT NULL AND ab.stale = TRUE THEN 1 END) AS stale_count,
+		        COUNT(CASE WHEN ab.entry_idx IS NULL THEN 1 END) AS missing_count
+		 FROM cert_metadata cm
+		 LEFT JOIN revoked_indices ri ON cm.entry_idx = ri.entry_idx
+		 LEFT JOIN assertion_bundles ab ON cm.entry_idx = ab.entry_idx
+		 WHERE cm.entry_idx > 0
+		 GROUP BY cm.ca_name, cm.batch_window, cm.key_algorithm, cm.is_pq
+		 ORDER BY cm.ca_name, cm.batch_window DESC, cert_count DESC`)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetVizSummary: %w", err)
+	}
+	defer rows.Close()
+
+	root := &VizSummary{Name: "All CAs", Level: "root"}
+	caMap := make(map[string]*VizSummary)
+	type batchKey struct{ ca, batch string }
+	batchMap := make(map[batchKey]*VizSummary)
+
+	for rows.Next() {
+		var caName, keyAlgo string
+		var batchWin time.Time
+		var isPQ bool
+		var certCount, revokedCount, freshCount, staleCount, missingCount int64
+		if err := rows.Scan(&caName, &batchWin, &keyAlgo, &isPQ, &certCount, &revokedCount,
+			&freshCount, &staleCount, &missingCount); err != nil {
+			return nil, fmt.Errorf("store.GetVizSummary: scan: %w", err)
+		}
+
+		ca, ok := caMap[caName]
+		if !ok {
+			ca = &VizSummary{Name: caName, Level: "ca", Color: vizCAColor(caName)}
+			caMap[caName] = ca
+			root.Children = append(root.Children, ca)
+		}
+		ca.CertCount += certCount
+		ca.RevokedCount += revokedCount
+		ca.FreshCount += freshCount
+		ca.StaleCount += staleCount
+		ca.MissingCount += missingCount
+
+		batchLabel := batchWin.Format("Jan 2 15:04")
+		bk := batchKey{caName, batchLabel}
+		batch, ok := batchMap[bk]
+		if !ok {
+			batch = &VizSummary{Name: batchLabel, Level: "batch", Color: ca.Color}
+			batchMap[bk] = batch
+			ca.Children = append(ca.Children, batch)
+		}
+		batch.CertCount += certCount
+		batch.RevokedCount += revokedCount
+		batch.FreshCount += freshCount
+		batch.StaleCount += staleCount
+		batch.MissingCount += missingCount
+
+		algo := &VizSummary{
+			Name:         keyAlgo,
+			Level:        "algo",
+			CertCount:    certCount,
+			RevokedCount: revokedCount,
+			FreshCount:   freshCount,
+			StaleCount:   staleCount,
+			MissingCount: missingCount,
+			Color:        ca.Color,
+		}
+		if isPQ {
+			algo.PQCount = certCount
+			batch.PQCount += certCount
+			ca.PQCount += certCount
+			root.PQCount += certCount
+		} else {
+			algo.ClassicalCount = certCount
+			batch.ClassicalCount += certCount
+			ca.ClassicalCount += certCount
+			root.ClassicalCount += certCount
+		}
+		batch.Children = append(batch.Children, algo)
+
+		root.CertCount += certCount
+		root.RevokedCount += revokedCount
+		root.FreshCount += freshCount
+		root.StaleCount += staleCount
+		root.MissingCount += missingCount
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store.GetVizSummary: rows: %w", err)
+	}
+
+	return root, nil
+}
+
+// GetVizCertificates returns paginated certificates for leaf-level visualization.
+func (s *Store) GetVizCertificates(ctx context.Context, caName, batchWin, algo string, limit, offset int) ([]*VizCertificate, int64, error) {
+	if limit <= 0 {
+		limit = 500
+	}
+
+	where := "cm.entry_idx > 0"
+	var args []interface{}
+	argIdx := 1
+
+	if caName != "" {
+		where += fmt.Sprintf(" AND cm.ca_name = $%d", argIdx)
+		args = append(args, caName)
+		argIdx++
+	}
+	if batchWin != "" {
+		where += fmt.Sprintf(" AND cm.batch_window = $%d::timestamptz", argIdx)
+		args = append(args, batchWin)
+		argIdx++
+	}
+	if algo != "" {
+		where += fmt.Sprintf(" AND cm.key_algorithm = $%d", argIdx)
+		args = append(args, algo)
+		argIdx++
+	}
+
+	var total int64
+	countArgs := make([]interface{}, len(args))
+	copy(countArgs, args)
+	err := s.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM cert_metadata cm WHERE %s`, where),
+		countArgs...).Scan(&total)
+	if err != nil {
+		return nil, 0, fmt.Errorf("store.GetVizCertificates: count: %w", err)
+	}
+
+	limitPlaceholder := fmt.Sprintf("$%d", argIdx)
+	offsetPlaceholder := fmt.Sprintf("$%d", argIdx+1)
+	dataArgs := append(args, limit, offset)
+
+	dataRows, err := s.db.QueryContext(ctx,
+		fmt.Sprintf(`SELECT cm.entry_idx, le.serial_hex, cm.common_name, cm.ca_name,
+		        cm.key_algorithm, cm.is_pq, cm.batch_window, le.created_at,
+		        CASE WHEN ri.entry_idx IS NOT NULL THEN TRUE ELSE FALSE END AS revoked
+		 FROM cert_metadata cm
+		 JOIN log_entries le ON cm.entry_idx = le.idx
+		 LEFT JOIN revoked_indices ri ON cm.entry_idx = ri.entry_idx
+		 WHERE %s
+		 ORDER BY cm.entry_idx DESC
+		 LIMIT %s OFFSET %s`, where, limitPlaceholder, offsetPlaceholder),
+		dataArgs...)
+	if err != nil {
+		return nil, 0, fmt.Errorf("store.GetVizCertificates: query: %w", err)
+	}
+	defer dataRows.Close()
+
+	var certs []*VizCertificate
+	for dataRows.Next() {
+		var c VizCertificate
+		var bw time.Time
+		var ca time.Time
+		if err := dataRows.Scan(&c.Index, &c.SerialHex, &c.CommonName, &c.CAName,
+			&c.KeyAlgorithm, &c.IsPQ, &bw, &ca, &c.Revoked); err != nil {
+			return nil, 0, fmt.Errorf("store.GetVizCertificates: scan: %w", err)
+		}
+		c.BatchWindow = bw.Format("Jan 2 15:04")
+		c.CreatedAt = ca.Format(time.RFC3339)
+		certs = append(certs, &c)
+	}
+	if err := dataRows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("store.GetVizCertificates: rows: %w", err)
+	}
+
+	return certs, total, nil
+}
+
+// GetVizStats returns aggregate statistics for the visualization stats bar.
+func (s *Store) GetVizStats(ctx context.Context) (*VizStats, error) {
+	var stats VizStats
+	err := s.db.QueryRowContext(ctx,
+		`SELECT
+			COUNT(*),
+			COUNT(ri.entry_idx),
+			COALESCE(SUM(CASE WHEN cm.is_pq THEN 1 ELSE 0 END), 0),
+			COUNT(DISTINCT cm.ca_name),
+			COUNT(CASE WHEN ab.entry_idx IS NOT NULL AND ab.stale = FALSE THEN 1 END),
+			COUNT(CASE WHEN ab.entry_idx IS NOT NULL AND ab.stale = TRUE THEN 1 END),
+			COUNT(CASE WHEN ab.entry_idx IS NULL THEN 1 END)
+		 FROM cert_metadata cm
+		 LEFT JOIN revoked_indices ri ON cm.entry_idx = ri.entry_idx
+		 LEFT JOIN assertion_bundles ab ON cm.entry_idx = ab.entry_idx
+		 WHERE cm.entry_idx > 0`).
+		Scan(&stats.Total, &stats.Revoked, &stats.PQCount, &stats.CACount,
+			&stats.FreshCount, &stats.StaleCount, &stats.MissingCount)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetVizStats: %w", err)
+	}
+	stats.Valid = stats.Total - stats.Revoked
+	if stats.Total > 0 {
+		stats.RevRate = float64(stats.Revoked) / float64(stats.Total)
+		stats.CoverageRate = float64(stats.FreshCount) / float64(stats.Total)
+	}
+	return &stats, nil
 }

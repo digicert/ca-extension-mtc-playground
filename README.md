@@ -31,6 +31,7 @@ focused on transparency and auditability.
 | Assertion bundles | Phase 1 | Self-contained proof artifacts (JSON + PEM) with cert metadata |
 | X.509 metadata extraction | Phase 1 | Parses DER certificates for display in bundles and UI |
 | Certificate browser | Phase 1 | Admin UI for searching/browsing certs with status badges |
+| Visualization explorer | Phase 4 | Sunburst, treemap, and proof explorer with 4 color modes |
 | `mtc-assertion` CLI | Phase 1 | Standalone tool to fetch, verify, and inspect assertion bundles |
 | Proactive assertion generation | Phase 2 | Background pipeline pre-computes bundles after each checkpoint |
 | Proof freshness management | Phase 2 | Detects and regenerates stale proofs as the tree grows |
@@ -209,6 +210,51 @@ The ACME server starts on `http://localhost:8443` (configurable via `acme.addr`)
   - Download certificate + assertion bundle (PEM)
   - See `.ai/phase3-acme-server.md` for full technical details and API examples.
 
+
+## Visualization Explorer
+
+The admin dashboard includes an interactive visualization module at
+`http://localhost:8080/admin/viz` with three viewing modes:
+
+### Sunburst & Treemap Views
+
+Both views render the certificate hierarchy (CA > Batch Window > Key Algorithm)
+using HTML5 Canvas. Click segments to drill down, use breadcrumbs to navigate
+back up.
+
+**Color modes** control how segments are colored:
+- **Trust Status** — green (valid) vs red (revoked)
+- **Key Algorithm** — purple (post-quantum) vs blue (classical)
+- **Certificate Age** — gradient from green (fresh) to red (expiring)
+- **Assertion Coverage** — green (>80% fresh proofs), amber (>30% stale),
+  red (>50% missing), blue (mixed)
+
+**Highlight Revoked** toggle dims non-revoked segments and amplifies revoked
+overlays with stronger colors and borders for quick identification.
+
+### Proof Explorer
+
+The Proof Explorer tab renders the Merkle inclusion proof for any certificate
+as an interactive binary tree visualization. Enter a leaf index to see:
+- The path from leaf to root highlighted in green
+- Proof sibling hashes shown in blue at each tree level
+- Hover any node to see its full SHA-256 hash
+- Side panel with complete proof details (leaf hash, root hash, all proof
+  hashes with left/right indicators)
+
+### Data Pipeline
+
+The visualization uses a `cert_metadata` cache table that is incrementally
+populated by parsing DER certificates on first access. This avoids re-parsing
+DER blobs on every request. The table is automatically populated when the
+visualization page is loaded.
+
+```bash
+# Open the visualization
+open http://localhost:8080/admin/viz
+```
+
+---
 
 ## Hands-On Walkthrough
 
@@ -661,6 +707,12 @@ Run just the ACME tests:
 | GET | `/admin/` | HTMX admin dashboard |
 | GET | `/admin/certs` | Certificate browser with search |
 | GET | `/admin/certs/{index}` | Certificate detail page with assertion bundle |
+| GET | `/admin/viz` | Visualization explorer (Sunburst, Treemap, Proof Explorer) |
+| GET | `/admin/viz/summary` | Aggregated certificate hierarchy JSON for visualization |
+| GET | `/admin/viz/certificates` | Paginated leaf-level certificates JSON |
+| GET | `/admin/viz/revocations` | Revoked entry indices JSON |
+| GET | `/admin/viz/stats` | Aggregate visualization statistics JSON |
+| GET | `/admin/viz/proof/{index}` | Merkle inclusion proof tree data for a leaf index |
 | GET | `/healthz` | Health check |
 
 ### ACME Server Endpoints (port 8443)
@@ -777,7 +829,7 @@ cmd/
   mtc-assertion/       CLI tool: fetch, verify, inspect assertion bundles
 internal/
   acme/                RFC 8555 ACME server (JWS, nonce, accounts, orders, challenges, CA proxy)
-  admin/               HTMX dashboard + certificate browser
+  admin/               HTMX dashboard + certificate browser + visualization explorer
   assertion/           Assertion bundle builder + JSON/PEM formatter
   assertionissuer/     Background assertion generation pipeline + webhooks
   cadb/                Read-only MariaDB adapter for DigiCert CA
