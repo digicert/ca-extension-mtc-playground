@@ -6,22 +6,22 @@ log:
   batch_size: 100
 
 state_db:
-  host: "localhost"
-  port: 5433
-  database: "mtcbridge"
-  username: "mtcbridge"
-  password: "mtcbridge"
+  host: "${MTC_STATE_DB_HOST:-localhost}"
+  port: ${MTC_STATE_DB_PORT:-5432}
+  database: "${MTC_STATE_DB_DATABASE:-mtcbridge}"
+  username: "${MTC_STATE_DB_USERNAME:-mtcbridge}"
+  password: "${MTC_STATE_DB_PASSWORD:-mtcbridge}"
   ssl_mode: "disable"
   max_open_conns: 10
   max_idle_conns: 3
   conn_max_lifetime: 5m
 
 ca_db:
-  host: "localhost"
-  port: 3306
-  database: "digicert_ca"
-  username: "caadmin"
-  password: "capassword"
+  host: "${MTC_CADB_HOST:-localhost}"
+  port: ${MTC_CADB_PORT:-3306}
+  database: "${MTC_CADB_DATABASE:-digicert_ca}"
+  username: "${MTC_CADB_USERNAME:-caadmin}"
+  password: "${MTC_CADB_PASSWORD:-capassword}"
   issuer_id: ""  # all CAs
 
 http:
@@ -38,7 +38,7 @@ watcher:
   batch_size: 500
 
 cosigner:
-  key_file: "keys/cosigner.key"
+  key_file: "${MTC_COSIGNER_KEY_FILE:-keys/cosigner.key}"
   key_id: "mtc-bridge-dev"
 
 logging:
@@ -58,13 +58,16 @@ assertion_issuer:
 acme:
   enabled: true
   addr: ":8443"
-  external_url: "http://localhost:8443"
-  ca_url: "http://localhost"
+  external_url: "https://localhost:8443"
+  ca_url: "${CA_URL:-http://localhost}"
   ca_api_key: "${CA_API_KEY:-010d292eea2aae809fa845ff78a68a14e93c215489b46e3ffdea6603fe0a2db0517940327c8c2123e2da794baad0bf19a9}"
   ca_id: "${CA_ID:-}"
   template_id: "${CA_TEMPLATE_ID:-}"
-  mtc_bridge_url: "http://localhost:8080"
+  mtc_bridge_url: "${MTC_BRIDGE_URL:-http://localhost:8080}"
   order_expiry: 24h
   assertion_timeout: 5m
   assertion_poll_interval: 5s
   auto_approve_challenge: true  # skip http-01 for internal CA
+
+  tls_cert: "/etc/mtc-bridge/acme-cert.pem"
+  tls_key: "/etc/mtc-bridge/acme-key.pem"

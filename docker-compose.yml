@@ -45,11 +45,50 @@ services:
       MTC_CADB_USERNAME: ${MTC_CADB_USERNAME:-caadmin}
       MTC_CADB_PASSWORD: ${MTC_CADB_PASSWORD:-capassword}
       MTC_CADB_DATABASE: ${MTC_CADB_DATABASE:-digicert_ca}
+      MTC_COSIGNER_KEY_FILE: /etc/mtc-bridge/keys/cosigner.key
     volumes:
       - ./config.yaml:/etc/mtc-bridge/config.yaml:ro
       - ./keys:/etc/mtc-bridge/keys:ro
+      - ./acme-cert.pem:/etc/mtc-bridge/acme-cert.pem:ro
+      - ./acme-key.pem:/etc/mtc-bridge/acme-key.pem:ro
     ports:
       - "${MTC_HTTP_PORT:-8080}:8080"
+    networks:
+      - mtc-internal
+      - digicert-ca_default
+    restart: unless-stopped
+
+  # ACME server (standalone)
+  acme-server:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      MTC_STATE_DB_HOST: postgres
+      MTC_STATE_DB_PORT: "5432"
+      MTC_STATE_DB_USERNAME: mtcbridge
+      MTC_STATE_DB_PASSWORD: ${MTC_POSTGRES_PASSWORD:-mtcbridge}
+      MTC_STATE_DB_DATABASE: mtcbridge
+      MTC_CADB_HOST: ${MTC_CADB_HOST:-ca-db}
+      MTC_CADB_PORT: ${MTC_CADB_PORT:-3306}
+      MTC_CADB_USERNAME: ${MTC_CADB_USERNAME:-caadmin}
+      MTC_CADB_PASSWORD: ${MTC_CADB_PASSWORD:-capassword}
+      MTC_CADB_DATABASE: ${MTC_CADB_DATABASE:-digicert_ca}
+      CA_API_KEY: ${CA_API_KEY}
+      CA_ID: ${CA_ID}
+      CA_TEMPLATE_ID: ${CA_TEMPLATE_ID}
+      CA_URL: ${CA_URL:-http://localhost}
+      MTC_BRIDGE_URL: http://mtc-bridge:8080
+      MTC_COSIGNER_KEY_FILE: /etc/mtc-bridge/keys/cosigner.key
+    command: [ "-config", "/etc/mtc-bridge/config.yaml" ]
+    volumes:
+      - ./config.yaml:/etc/mtc-bridge/config.yaml:ro
+      - ./keys:/etc/mtc-bridge/keys:ro
+      - ./acme-cert.pem:/etc/mtc-bridge/acme-cert.pem:ro
+      - ./acme-key.pem:/etc/mtc-bridge/acme-key.pem:ro
+    ports:
+      - "8443:8443"
     networks:
       - mtc-internal
       - digicert-ca_default

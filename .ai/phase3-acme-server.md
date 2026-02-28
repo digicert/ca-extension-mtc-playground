@@ -32,9 +32,11 @@ The ACME server implements JWS request verification (ES256 + RS256), nonce-based
 | `internal/store` | Added 4 ACME tables (`acme_accounts`, `acme_orders`, `acme_authorizations`, `acme_challenges`) with 6 indexes. Added 4 types (`ACMEAccount`, `ACMEOrder`, `ACMEAuthorization`, `ACMEChallenge`). Added ~16 CRUD methods. |
 | `internal/config` | Added `ACMEConfig` type with 12 fields. Added `IsEnabled()` method. Added ACME defaults in `applyDefaults()`. |
 | `cmd/mtc-bridge` | Wired ACME server creation and startup on separate HTTP listener. Included in graceful shutdown. |
-| `cmd/mtc-conformance` | Added 5 ACME conformance tests (22 total) + JWS helper functions. Added `-acme-url` flag. |
+| `cmd/mtc-conformance` | Added 6 ACME conformance tests (23 total) + JWS helper functions. Added `-acme-url` and `-insecure` flags. TLS skip-verify for HTTPS ACME URLs. |
 | `Makefile` | Updated conformance target with `-acme-url` flag. |
-| `config.yaml` | Added `acme:` configuration section with local dev values. |
+| `config.yaml` | Added `acme:` section. Updated all DB/URL fields to use `${VAR:-default}` env var substitution for Docker compatibility. Changed `external_url` to `https://`. Added TLS cert/key paths. |
+| `docker-compose.yml` | Fixed acme-server command (removed duplicate binary name, removed nonexistent `-acme` flag). Added missing `MTC_CADB_*` and `MTC_COSIGNER_KEY_FILE` env vars. |
+| `Dockerfile` | Added `EXPOSE 8443` for ACME server port. |
 
 ## Major Design Decisions
 
@@ -254,24 +256,30 @@ CREATE TABLE IF NOT EXISTS acme_challenges (
 acme:
   enabled: true
   addr: ":8443"
-  external_url: "http://localhost:8443"
-  ca_proxy_url: "http://localhost:80"
-  ca_api_key: "<digicert-ca-api-key>"
-  ca_id: "default"
-  template_id: "default"
-  mtc_bridge_url: "http://localhost:8080"
+  external_url: "https://localhost:8443"
+  ca_url: "${CA_URL:-http://localhost}"
+  ca_api_key: "${CA_API_KEY:-your-api-key}"
+  ca_id: "${CA_ID:-}"
+  template_id: "${CA_TEMPLATE_ID:-}"
+  mtc_bridge_url: "${MTC_BRIDGE_URL:-http://localhost:8080}"
   auto_approve_challenge: true
+  tls_cert: "/etc/mtc-bridge/acme-cert.pem"
+  tls_key: "/etc/mtc-bridge/acme-key.pem"
   # order_expiry: "24h"           # default
   # assertion_timeout: "5m"       # default
   # assertion_poll_interval: "5s" # default
 ```
+
+**Important:** The `external_url` must use `https://` to match the TLS-enabled server.
+JWS URL validation in the ACME protocol checks the `url` header field against the
+server's external URL, and a scheme mismatch will cause 401 errors.
 
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `true` | Enable/disable the ACME server |
 | `addr` | `:8443` | Listen address for the ACME HTTP server |
 | `external_url` | — | Base URL used in ACME responses (directory, Location headers) |
-| `ca_proxy_url` | — | DigiCert Private CA base URL for finalize proxy |
+| `ca_url` | — | DigiCert Private CA base URL for finalize proxy |
 | `ca_api_key` | — | API key for the DigiCert CA REST API |
 | `ca_id` | — | CA identifier for certificate issuance |
 | `template_id` | — | Certificate template ID |
@@ -280,12 +288,14 @@ acme:
 | `order_expiry` | `24h` | How long before pending orders expire |
 | `assertion_timeout` | `5m` | Max wait time for assertion bundle during finalize |
 | `assertion_poll_interval` | `5s` | How often to check for assertion bundle |
+| `tls_cert` | — | Path to TLS certificate PEM file for HTTPS |
+| `tls_key` | — | Path to TLS private key PEM file for HTTPS |
 
 ## Test Coverage
 
 | Type | Count | Description |
 |---|---|---|
-| Conformance tests | 5 new (22 total) | `acme_directory`, `acme_nonce`, `acme_new_account`, `acme_new_order`, `acme_order_flow` |
+| Conformance tests | 6 ACME (23 total) | `acme_directory`, `acme_nonce`, `acme_new_account`, `acme_new_order`, `acme_order_flow`, `acme_full_mtc_flow` |
 | Unit tests | All passing | `go test ./internal/...` — no regressions |
 
 ### Conformance Test Details
@@ -297,6 +307,7 @@ acme:
 | `acme_new_account` | JWS-signed account creation with ECDSA P-256, returns 201 + Location |
 | `acme_new_order` | Order creation with DNS identifier, returns pending status + authz URLs |
 | `acme_order_flow` | Full lifecycle: account → order → authz → challenge → poll until ready |
+| `acme_full_mtc_flow` | **End-to-end MTC pipeline**: account → order → challenge → finalize (CSR proxied to DigiCert CA) → poll until cert is issued, ingested into Merkle tree, and assertion proof is built → download certificate with MTC assertion bundle → verify bundle contains inclusion proof with Leaf-Index and Log-Origin |
 
 ### JWS Test Helpers
 
@@ -309,16 +320,16 @@ The conformance client includes ACME JWS helpers for test requests:
 ## Demo Commands
 
 ```bash
-# ACME directory
-curl -s http://localhost:8443/acme/directory | python3 -m json.tool
+# ACME directory (-k for self-signed TLS cert)
+curl -sk https://localhost:8443/acme/directory | python3 -m json.tool
 
 # Get a nonce
-curl -sI http://localhost:8443/acme/new-nonce | grep -i replay-nonce
+curl -skI https://localhost:8443/acme/new-nonce | grep -i replay-nonce
 
-# Run ACME conformance tests
-./bin/mtc-conformance -url http://localhost:8080 -acme-url http://localhost:8443 -verbose
+# Run ACME conformance tests (TLS skip-verify is automatic for https:// URLs)
+./bin/mtc-conformance -url http://localhost:8080 -acme-url https://localhost:8443 -verbose
 
-# Run all 22 conformance tests
+# Run all 23 conformance tests
 make conformance
 ```
 
@@ -346,11 +357,22 @@ Modified:
                                 defaults in applyDefaults()
   cmd/mtc-bridge/main.go        ACME server creation, config mapping,
                                 separate HTTP listener, graceful shutdown
-  cmd/mtc-conformance/main.go   5 ACME tests, JWS helpers, -acme-url flag
+  cmd/mtc-conformance/main.go   6 ACME tests, JWS helpers, -acme-url/-insecure flags, TLS support
   Makefile                      -acme-url in conformance target
   config.yaml                   acme: configuration section
   README.md                     Phase 3 features, ACME endpoints, architecture
 ```
+
+## Docker Deployment Fixes (Post-Phase 3)
+
+Several issues were discovered and fixed during Docker deployment:
+
+1. **Config env var substitution** — All `state_db`, `ca_db`, `cosigner`, and `acme` fields now use `${VAR:-default}` patterns so the same config.yaml works locally and in Docker.
+2. **ENTRYPOINT/CMD interaction** — Docker command changed from `["mtc-bridge", "-config", "..."]` to `["-config", "..."]` since ENTRYPOINT already provides the binary name.
+3. **Cosigner key path** — Changed from relative `keys/cosigner.key` to `${MTC_COSIGNER_KEY_FILE:-keys/cosigner.key}` with Docker override to `/etc/mtc-bridge/keys/cosigner.key`.
+4. **ACME server env vars** — Added missing `MTC_CADB_*` env vars to the acme-server Docker service.
+5. **TLS external_url** — Changed from `http://` to `https://` to match the TLS-enabled server and prevent JWS URL validation failures.
+6. **Dockerfile EXPOSE** — Added `EXPOSE 8443` for the ACME server port.
 
 ## What's Next (Phase 4)
 
@@ -358,6 +380,41 @@ Phase 4 focuses on **production hardening and observability**:
 1. Structured logging (slog) with request IDs
 2. Prometheus metrics for both HTTP and ACME servers
 3. Rate limiting on ACME endpoints
-4. TLS support for the ACME server
-5. Docker Compose integration with ACME server
-6. Load testing and performance benchmarks
+4. Load testing and performance benchmarks
+5. ACME client integration guides (certbot, acme.sh)
+
+## Fully Automated End-to-End Demo (Phase 3)
+
+The full ACME-to-MTC pipeline has been verified end-to-end with a real DigiCert Private CA.
+The `acme_full_mtc_flow` conformance test exercises every stage:
+
+1. ACME account creation (ES256 JWS)
+2. Order + authorization with http-01 challenge (auto-approved)
+3. RSA-2048 CSR finalize → proxied to DigiCert CA → cert issued
+4. Watcher detects new cert in MariaDB → appends to Merkle tree
+5. Assertion issuer builds inclusion proof bundle at next checkpoint
+6. Certificate download returns X.509 PEM + MTC assertion bundle PEM
+
+### How to Run
+
+```bash
+# 1. Configure CA credentials
+cp .env.example .env  # edit with your CA_API_KEY, CA_ID, CA_TEMPLATE_ID
+
+# 2. Generate self-signed TLS certs
+./gen-demo-cert.sh
+
+# 3. Start all services
+docker compose up -d
+
+# 4. Build and run conformance tests
+make build
+./bin/mtc-conformance -url http://localhost:8080 -acme-url https://localhost:8443 -verbose
+# All 23 tests pass including acme_full_mtc_flow
+```
+
+### Verification
+- ACME directory: `curl -sk https://localhost:8443/acme/directory`
+- Health check: `curl -s http://localhost:8080/healthz`
+- Admin UI: `http://localhost:8080/admin/`
+- Merkle checkpoint: `curl -s http://localhost:8080/checkpoint`

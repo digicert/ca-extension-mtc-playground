@@ -180,8 +180,15 @@ func main() {
 		}
 		go func() {
 			logger.Info("ACME server starting", "addr", cfg.ACME.Addr, "external_url", cfg.ACME.ExternalURL)
-			if err := acmeServer.ListenAndServe(); err != http.ErrServerClosed {
-				logger.Error("ACME server error", "error", err)
+			if cfg.ACME.TLSCert != "" && cfg.ACME.TLSKey != "" {
+				logger.Info("ACME server using HTTPS", "cert", cfg.ACME.TLSCert, "key", cfg.ACME.TLSKey)
+				if err := acmeServer.ListenAndServeTLS(cfg.ACME.TLSCert, cfg.ACME.TLSKey); err != http.ErrServerClosed {
+					logger.Error("ACME server TLS error", "error", err)
+				}
+			} else {
+				if err := acmeServer.ListenAndServe(); err != http.ErrServerClosed {
+					logger.Error("ACME server error", "error", err)
+				}
 			}
 		}()
 		// Shutdown ACME server on context cancel.

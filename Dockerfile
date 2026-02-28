@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.24-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 RUN apk add --no-cache git ca-certificates
 
@@ -24,7 +24,7 @@ COPY --from=builder /mtc-conformance /usr/local/bin/mtc-conformance
 # Default config location
 COPY config.example.yaml /etc/mtc-bridge/config.yaml
 
-EXPOSE 8080
+EXPOSE 8080 8443
 
 ENTRYPOINT ["mtc-bridge"]
 CMD ["-config", "/etc/mtc-bridge/config.yaml"]

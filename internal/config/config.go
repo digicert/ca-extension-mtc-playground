@@ -81,6 +81,12 @@ type ACMEConfig struct {
 
 	// AutoApproveChallenge skips real http-01 validation (for internal CAs).
 	AutoApproveChallenge bool `yaml:"auto_approve_challenge"`
+
+	// TLSCert is the path to the TLS certificate for HTTPS.
+	TLSCert string `yaml:"tls_cert"`
+
+	// TLSKey is the path to the TLS private key for HTTPS.
+	TLSKey string `yaml:"tls_key"`
 }
 
 // AssertionIssuerConfig configures the background assertion generation pipeline.

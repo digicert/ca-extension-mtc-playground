@@ -123,7 +123,7 @@ proof bundle before delivering the certificate with its MTC proof.
 
 - **Go 1.21+**
 - **DigiCert Private CA** running with MariaDB (container `ca-db` on port 3306)
-- **PostgreSQL 16** for the state store (container `mtc-state-db` on port 5433)
+- **PostgreSQL 16** for the state store (via Docker Compose on port 5432)
 - **DigiCert CA API key** (provisioned during CA setup)
 - `curl`, `openssl`, `jq` for the walkthrough commands
 
@@ -142,22 +142,24 @@ make build
 # 3. Generate a cosigner key (first time only)
 make generate-key
 
-# 4. Start PostgreSQL state store (if not already running)
-docker run -d --name mtc-state-db \
-  -e POSTGRES_DB=mtcbridge \
-  -e POSTGRES_USER=mtcbridge \
-  -e POSTGRES_PASSWORD=mtcbridge \
-  -p 5433:5432 \
-  postgres:16-alpine
+# 4. Configure environment (copy and edit .env with your CA credentials)
+cp .env.example .env
+# Edit .env with your DigiCert CA API key, CA ID, and template ID
 
-# 5. Run mtc-bridge
+# 5. Generate self-signed TLS certs for the ACME server
+./gen-demo-cert.sh
+
+# 6. Start all services via Docker Compose
+docker compose up -d
+
+# Or run locally (requires PostgreSQL on localhost:5432):
 make run
 # Or: ./bin/mtc-bridge -config config.yaml
 ```
 
 The service starts on `http://localhost:8080`. It will immediately begin
 ingesting certificates from the CA database and building the Merkle tree.
-The ACME server starts on `http://localhost:8443` (configurable via `acme.addr`).
+The ACME server starts on `https://localhost:8443` (TLS with self-signed cert).
 
 ---
 
@@ -173,43 +175,65 @@ The ACME server starts on `http://localhost:8443` (configurable via `acme.addr`)
 - **In-memory nonce store** with TTL cleanup.
 - **Database**: 4 new ACME tables, 6 indexes, ~16 CRUD methods.
 - **Config**: `ACMEConfig` with 12 fields, sensible defaults.
-- **Conformance**: 5 new ACME tests, 22 total, all passing.
+- **Conformance**: 6 ACME tests (23 total), all passing — including full MTC flow with real CA.
 
 ### How to Demonstrate
 
 1. **Start the Service**
-  ```bash
-  make build
-  ./bin/mtc-bridge -config config.yaml
-  ```
-  - Main API: `http://localhost:8080`
-  - ACME API: `http://localhost:8443`
+   ```bash
+   make build
+   ./bin/mtc-bridge -config config.yaml
+   ```
+   - Main API: `http://localhost:8080`
+   - ACME API: `https://localhost:8443`
+
+   Or use Docker Compose for reproducible setup:
+   ```bash
+   cp .env.example .env   # edit with your CA credentials
+   ./gen-demo-cert.sh     # generate self-signed TLS certs
+   docker compose up -d
+   docker compose logs -f acme-server
+   ```
+   - Main API: `http://localhost:8080`
+   - ACME API: `https://localhost:8443`
 
 2. **Check ACME Directory**
-  ```bash
-  curl -s http://localhost:8443/acme/directory | python3 -m json.tool
-  ```
+   ```bash
+   curl -sk https://localhost:8443/acme/directory | python3 -m json.tool
+   ```
 
 3. **Get a Replay-Nonce**
-  ```bash
-  curl -sI http://localhost:8443/acme/new-nonce | grep -i replay-nonce
-  ```
+   ```bash
+   curl -skI https://localhost:8443/acme/new-nonce | grep -i replay-nonce
+   ```
 
 4. **Run ACME Conformance Tests**
-  ```bash
-  ./bin/mtc-conformance -url http://localhost:8080 -acme-url http://localhost:8443 -verbose
-  ```
-  - All 22 tests should pass, including 5 ACME tests.
+   ```bash
+   ./bin/mtc-conformance -url http://localhost:8080 -acme-url https://localhost:8443 -verbose
+   ```
+   - All 23 tests should pass, including 6 ACME tests.
+
+   Or run all tests with:
+   ```bash
+   make conformance
+   ```
 
 5. **Full ACME Order Flow**
-  - Create account (JWS POST to `/acme/new-account`)
-  - Create order (JWS POST to `/acme/new-order`)
-  - Get authorization and challenge
-  - Trigger challenge validation (auto-approved in dev mode)
-  - Finalize order (proxy CSR to DigiCert CA)
-  - Download certificate + assertion bundle (PEM)
-  - See `.ai/phase3-acme-server.md` for full technical details and API examples.
+   - Create account (JWS POST to `/acme/new-account`)
+   - Create order (JWS POST to `/acme/new-order`)
+   - Get authorization and challenge
+   - Trigger challenge validation (auto-approved in dev mode)
+   - Finalize order (proxy CSR to DigiCert CA)
+   - Download certificate + assertion bundle (PEM)
+   - See `.ai/phase3-acme-server.md` for full technical details and API examples.
 
+   For a quick demo, use the provided script:
+   ```bash
+   ./demo-acme.sh
+   ```
+   This automates key/CSR generation, ACME directory/nonce fetch, and guides you to run conformance tests for full flow.
+
+---
 
 ## Visualization Explorer
 
@@ -628,8 +652,9 @@ Target: http://localhost:8080
   acme_new_account               [PASS]
   acme_new_order                 [PASS]
   acme_order_flow                [PASS]
+  acme_full_mtc_flow             [PASS]
 
-Results: 22 passed, 0 failed, 0 skipped
+Results: 23 passed, 0 failed, 0 skipped
 ```
 
 ### Step 15 — ACME Server: Directory & Nonce
@@ -638,29 +663,29 @@ The ACME server runs on a separate port (default 8443) and implements
 RFC 8555 for automated certificate issuance.
 
 ```bash
-export ACME_URL="http://localhost:8443"
+export ACME_URL="https://localhost:8443"
 
-# Fetch the ACME directory
-curl -s $ACME_URL/acme/directory | python3 -m json.tool
+# Fetch the ACME directory (-k for self-signed TLS cert)
+curl -sk $ACME_URL/acme/directory | python3 -m json.tool
 ```
 
 Example output:
 
 ```json
 {
-  "newAccount": "http://localhost:8443/acme/new-account",
-  "newNonce": "http://localhost:8443/acme/new-nonce",
-  "newOrder": "http://localhost:8443/acme/new-order",
+  "newAccount": "https://localhost:8443/acme/new-account",
+  "newNonce": "https://localhost:8443/acme/new-nonce",
+  "newOrder": "https://localhost:8443/acme/new-order",
   "meta": {
     "externalAccountRequired": false,
-    "website": "http://localhost:8443"
+    "website": "https://localhost:8443"
   }
 }
 ```
 
 ```bash
 # Get a replay-protection nonce
-curl -sI $ACME_URL/acme/new-nonce | grep -i replay-nonce
+curl -skI $ACME_URL/acme/new-nonce | grep -i replay-nonce
 ```
 
 ### Step 16 — ACME Order Lifecycle (via conformance test)
@@ -678,7 +703,7 @@ The ACME conformance tests exercise the full order lifecycle:
 Run just the ACME tests:
 
 ```bash
-./bin/mtc-conformance -url http://localhost:8080 -acme-url http://localhost:8443 -verbose 2>&1 | grep acme
+./bin/mtc-conformance -url http://localhost:8080 -acme-url https://localhost:8443 -verbose 2>&1 | grep acme
 ```
 
 ```
@@ -687,7 +712,13 @@ Run just the ACME tests:
   acme_new_account               [PASS]
   acme_new_order                 [PASS]
   acme_order_flow                [PASS]
+  acme_full_mtc_flow             [PASS]
 ```
+
+The `acme_full_mtc_flow` test exercises the **complete MTC pipeline**: ACME account
+creation → order → challenge → CSR finalize (proxied to DigiCert CA) → poll until
+the watcher ingests the cert into the Merkle tree → assertion issuer builds the
+inclusion proof → certificate download with MTC assertion bundle attached.
 
 ---
 
@@ -825,7 +856,7 @@ to fetch the full bundle.
 ```
 cmd/
   mtc-bridge/          Main service binary
-  mtc-conformance/     Conformance test client (22 tests)
+  mtc-conformance/     Conformance test client (23 tests)
   mtc-assertion/       CLI tool: fetch, verify, inspect assertion bundles
 internal/
   acme/                RFC 8555 ACME server (JWS, nonce, accounts, orders, challenges, CA proxy)
@@ -878,7 +909,7 @@ the full list).
 # Unit tests (44+ tests across merkle, config, cosigner, certutil, tlogtiles packages)
 make test
 
-# Conformance tests (22 tests, requires a running mtc-bridge instance)
+# Conformance tests (23 tests, requires a running mtc-bridge instance)
 make conformance
 
 # Go vet
@@ -950,3 +981,85 @@ Headers:
 ## License
 
 Internal / experimental. Not for production use.
+
+## Fully Automated End-to-End Demo
+
+This project provides a scriptable, reproducible demo of the complete ACME-to-MTC pipeline:
+ACME certificate request → DigiCert CA issuance → Merkle tree ingestion → assertion proof
+generation → certificate download with MTC assertion bundle attached.
+
+### Prerequisites
+- Fill in your secrets and config values in `.env` (copy from `.env.example`)
+- Ensure Docker and Docker Compose are installed
+- DigiCert Private CA and MariaDB available on the Docker network (see docker-compose.yml)
+
+### Environment Variables (`.env`)
+
+```bash
+# Required — DigiCert Private CA credentials
+CA_API_KEY=your-api-key-here
+CA_ID=your-ca-id-here
+CA_TEMPLATE_ID=your-template-id-here
+CA_URL=http://digicert-ca:8080     # Docker service name
+
+# Database credentials (defaults usually work)
+MTC_POSTGRES_PASSWORD=mtcbridge
+MTC_CADB_HOST=ca-db
+MTC_CADB_PORT=3306
+MTC_CADB_USERNAME=caadmin
+MTC_CADB_PASSWORD=capassword
+MTC_CADB_DATABASE=digicert_ca
+```
+
+### Steps
+1. Generate demo TLS certs for the ACME server:
+   ```bash
+   ./gen-demo-cert.sh
+   ```
+2. Start all services:
+   ```bash
+   docker compose up -d
+   ```
+3. Verify everything is healthy:
+   ```bash
+   docker compose ps          # all containers should be "Up"
+   curl -s http://localhost:8080/healthz  # {"status":"ok"}
+   curl -sk https://localhost:8443/acme/directory | python3 -m json.tool
+   ```
+4. Run the conformance suite (includes full MTC flow):
+   ```bash
+   make build
+   ./bin/mtc-conformance -url http://localhost:8080 -acme-url https://localhost:8443 -verbose
+   ```
+   All 23 tests pass, including `acme_full_mtc_flow` which exercises the complete pipeline.
+5. Or run the end-to-end demo script:
+   ```bash
+   ./demo-e2e.sh
+   ```
+
+### Docker Deployment Notes
+
+The Docker Compose setup runs three containers:
+- **postgres** — PostgreSQL 16 state store for the Merkle tree
+- **mtc-bridge** — main service (watcher, tree builder, assertion issuer, HTTP API on :8080)
+- **acme-server** — ACME server (RFC 8555 on :8443 with TLS)
+
+Configuration uses environment variable substitution (`${VAR:-default}` in config.yaml),
+so the same config file works for both local development and Docker deployment. Docker
+services communicate via Docker DNS names (e.g., `postgres`, `digicert-ca`, `ca-db`).
+
+### What the Full MTC Flow Demonstrates
+
+1. **ACME Account Creation** — ES256 JWS-signed request, account stored by JWK thumbprint
+2. **Order + Authorization** — DNS identifier order with http-01 challenge (auto-approved for internal CA)
+3. **CSR Finalize** — RSA-2048 CSR proxied to DigiCert Private CA REST API
+4. **Certificate Issuance** — DigiCert CA issues the certificate, returns serial number
+5. **Merkle Tree Ingestion** — Watcher detects the new cert in MariaDB, appends to Merkle tree
+6. **Assertion Proof Generation** — Assertion issuer builds inclusion proof bundle at next checkpoint
+7. **Certificate Download** — ACME certificate endpoint returns X.509 PEM + MTC assertion bundle
+
+The assertion bundle contains the Merkle inclusion proof, leaf index, log origin, and
+signed checkpoint — everything needed to independently verify the certificate's presence
+in the transparency log.
+
+See the script output and admin UI (`http://localhost:8080/admin/`) for verification.

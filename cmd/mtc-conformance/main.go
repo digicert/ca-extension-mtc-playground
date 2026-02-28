@@ -10,7 +10,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -29,15 +34,23 @@ const hashSize = 32
 
 func main() {
 	baseURL := flag.String("url", "http://localhost:8080", "base URL of the tlog-tiles server")
-	acmeURL := flag.String("acme-url", "http://localhost:8443", "base URL of the ACME server")
+	acmeURL := flag.String("acme-url", "https://localhost:8443", "base URL of the ACME server")
+	insecure := flag.Bool("insecure", false, "skip TLS certificate verification (for self-signed certs)")
 	verbose := flag.Bool("verbose", false, "verbose output")
 	flag.Parse()
+
+	httpClient := &http.Client{Timeout: 30 * time.Second}
+	if *insecure || strings.HasPrefix(*acmeURL, "https://") {
+		httpClient.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		}
+	}
 
 	c := &conformanceClient{
 		baseURL: strings.TrimRight(*baseURL, "/"),
 		acmeURL: strings.TrimRight(*acmeURL, "/"),
 		verbose: *verbose,
-		client:  &http.Client{Timeout: 30 * time.Second},
+		client:  httpClient,
 	}
 
 	fmt.Println("=== MTC tlog-tiles Conformance Test Suite ===")
@@ -71,6 +84,7 @@ func main() {
 		{"acme_new_account", c.testACMENewAccount},
 		{"acme_new_order", c.testACMENewOrder},
 		{"acme_order_flow", c.testACMEOrderFlow},
+		{"acme_full_mtc_flow", c.testACMEFullMTCFlow},
 	}
 
 	for _, tt := range tests {
@@ -1118,4 +1132,257 @@ func (c *conformanceClient) testACMEOrderFlow() error {
 		}
 	}
 	return fmt.Errorf("order did not reach ready state within timeout, last status=%v", order["status"])
+}
+
+// testACMEFullMTCFlow exercises the complete ACME → DigiCert CA → MTC assertion pipeline:
+// account → order → challenge → finalize(CSR) → CA issues cert → watcher logs cert →
+// assertion issuer generates inclusion proof → certificate download with MTC bundle.
+func (c *conformanceClient) testACMEFullMTCFlow() error {
+	acmeKey, err := c.acmeKey()
+	if err != nil {
+		return fmt.Errorf("generate ACME key: %w", err)
+	}
+
+	domain := fmt.Sprintf("mtc-e2e-%d.example.com", time.Now().UnixNano()%100000)
+	if c.verbose {
+		fmt.Printf("    domain: %s\n", domain)
+	}
+
+	// Step 1: Create account.
+	acctPayload := map[string]interface{}{
+		"termsOfServiceAgreed": true,
+		"contact":              []string{"mailto:mtc-e2e@example.com"},
+	}
+	_, status, headers, err := c.acmePost(c.acmeURL+"/acme/new-account", acmeKey, acctPayload, "")
+	if err != nil {
+		return fmt.Errorf("create account: %w", err)
+	}
+	if status != 201 && status != 200 {
+		return fmt.Errorf("account creation failed: %d", status)
+	}
+	kid := headers.Get("Location")
+	if c.verbose {
+		fmt.Printf("    account: %s\n", kid)
+	}
+
+	// Step 2: Create order.
+	orderPayload := map[string]interface{}{
+		"identifiers": []map[string]string{
+			{"type": "dns", "value": domain},
+		},
+	}
+	body, status, orderHeaders, err := c.acmePost(c.acmeURL+"/acme/new-order", acmeKey, orderPayload, kid)
+	if err != nil {
+		return fmt.Errorf("create order: %w", err)
+	}
+	if status != 201 {
+		return fmt.Errorf("expected 201 for new-order, got %d: %s", status, string(body))
+	}
+	orderLoc := orderHeaders.Get("Location")
+	var order map[string]interface{}
+	json.Unmarshal(body, &order)
+	authzs := order["authorizations"].([]interface{})
+	if c.verbose {
+		fmt.Printf("    order: %s status=%v\n", orderLoc, order["status"])
+	}
+
+	// Step 3: Get authorization and respond to http-01 challenge.
+	authzURL := authzs[0].(string)
+	body, status, _, err = c.acmePost(authzURL, acmeKey, nil, kid)
+	if err != nil {
+		return fmt.Errorf("get authz: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("authz failed: %d", status)
+	}
+	var authz map[string]interface{}
+	json.Unmarshal(body, &authz)
+	challenges := authz["challenges"].([]interface{})
+	var challengeURL string
+	for _, ch := range challenges {
+		chMap := ch.(map[string]interface{})
+		if chMap["type"] == "http-01" {
+			challengeURL = chMap["url"].(string)
+			break
+		}
+	}
+	if challengeURL == "" {
+		return fmt.Errorf("no http-01 challenge found")
+	}
+
+	// Step 4: POST challenge (auto-approve mode).
+	body, status, _, err = c.acmePost(challengeURL, acmeKey, map[string]interface{}{}, kid)
+	if err != nil {
+		return fmt.Errorf("post challenge: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("challenge POST failed: %d: %s", status, string(body))
+	}
+	if c.verbose {
+		fmt.Printf("    challenge: submitted\n")
+	}
+
+	// Step 5: Poll until order is "ready".
+	for i := 0; i < 10; i++ {
+		time.Sleep(500 * time.Millisecond)
+		body, status, _, err = c.acmePost(orderLoc, acmeKey, nil, kid)
+		if err != nil {
+			return fmt.Errorf("poll order: %w", err)
+		}
+		json.Unmarshal(body, &order)
+		st := order["status"].(string)
+		if st == "ready" {
+			break
+		}
+		if st == "invalid" {
+			return fmt.Errorf("order became invalid before finalize")
+		}
+	}
+	if order["status"].(string) != "ready" {
+		return fmt.Errorf("order did not reach ready, got %v", order["status"])
+	}
+	if c.verbose {
+		fmt.Printf("    order status: ready\n")
+	}
+
+	// Step 6: Generate RSA key + CSR and finalize the order.
+	csrKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return fmt.Errorf("generate CSR key: %w", err)
+	}
+	csrTemplate := &x509.CertificateRequest{
+		Subject: pkix.Name{
+			CommonName:   domain,
+			Organization: []string{"MTC E2E Test"},
+			Country:      []string{"US"},
+		},
+		DNSNames: []string{domain},
+		ExtraExtensions: []pkix.Extension{
+			{
+				Id:    asn1.ObjectIdentifier{2, 5, 29, 17}, // SAN OID
+				Value: nil,                                  // x509 fills from DNSNames
+			},
+		},
+	}
+	// Remove the manual SAN extension — x509.CreateCertificateRequest handles DNSNames.
+	csrTemplate.ExtraExtensions = nil
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, csrTemplate, csrKey)
+	if err != nil {
+		return fmt.Errorf("create CSR: %w", err)
+	}
+	csrB64 := base64.RawURLEncoding.EncodeToString(csrDER)
+
+	finalizeURL := order["finalize"].(string)
+	finalizePayload := map[string]interface{}{
+		"csr": csrB64,
+	}
+	body, status, _, err = c.acmePost(finalizeURL, acmeKey, finalizePayload, kid)
+	if err != nil {
+		return fmt.Errorf("finalize: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("finalize failed: %d: %s", status, string(body))
+	}
+	json.Unmarshal(body, &order)
+	if c.verbose {
+		fmt.Printf("    finalize: status=%v\n", order["status"])
+	}
+
+	// Step 7: Poll until order becomes "valid" (cert issued + assertion ready).
+	// This is the MTC magic — the server waits for the cert to be logged in the
+	// transparency tree and for the assertion issuer to generate an inclusion proof.
+	var certURL string
+	if c.verbose {
+		fmt.Printf("    waiting for CA issuance + MTC assertion bundle...\n")
+	}
+	for i := 0; i < 120; i++ { // up to 60s (CA issuance + watcher poll + assertion generation)
+		time.Sleep(500 * time.Millisecond)
+		body, status, _, err = c.acmePost(orderLoc, acmeKey, nil, kid)
+		if err != nil {
+			return fmt.Errorf("poll order for valid: %w", err)
+		}
+		json.Unmarshal(body, &order)
+		st := order["status"].(string)
+		if c.verbose && i%10 == 0 && i > 0 {
+			fmt.Printf("    poll %d: status=%s\n", i, st)
+		}
+		if st == "valid" {
+			certURL, _ = order["certificate"].(string)
+			break
+		}
+		if st == "invalid" {
+			detail := ""
+			if errObj, ok := order["error"]; ok {
+				if errMap, ok := errObj.(map[string]interface{}); ok {
+					detail, _ = errMap["detail"].(string)
+				}
+			}
+			return fmt.Errorf("order became invalid during finalize: %s", detail)
+		}
+	}
+	if certURL == "" {
+		return fmt.Errorf("order did not reach valid within timeout, last status=%v", order["status"])
+	}
+	if c.verbose {
+		fmt.Printf("    order valid! certificate: %s\n", certURL)
+	}
+
+	// Step 8: Download certificate — should contain X.509 cert + MTC assertion bundle.
+	body, status, _, err = c.acmePost(certURL, acmeKey, nil, kid)
+	if err != nil {
+		return fmt.Errorf("download cert: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("cert download failed: %d: %s", status, string(body))
+	}
+
+	certPEM := string(body)
+
+	// Verify X.509 certificate is present.
+	if !strings.Contains(certPEM, "-----BEGIN CERTIFICATE-----") {
+		return fmt.Errorf("response missing X.509 certificate PEM")
+	}
+	if c.verbose {
+		fmt.Printf("    certificate PEM: %d bytes\n", len(certPEM))
+	}
+
+	// Verify MTC Assertion Bundle is present — this is the Google MTC integration.
+	if !strings.Contains(certPEM, "-----BEGIN MTC ASSERTION BUNDLE-----") {
+		// The assertion bundle may not be ready yet if the watcher hasn't polled.
+		// This is still a valid cert but without the MTC proof.
+		if c.verbose {
+			fmt.Printf("    WARNING: MTC assertion bundle not yet attached (watcher may not have polled)\n")
+		}
+		return fmt.Errorf("MTC assertion bundle missing from certificate download — " +
+			"cert was issued but not yet logged in the transparency tree")
+	}
+	if !strings.Contains(certPEM, "-----END MTC ASSERTION BUNDLE-----") {
+		return fmt.Errorf("MTC assertion bundle PEM incomplete")
+	}
+	if !strings.Contains(certPEM, "Leaf-Index:") {
+		return fmt.Errorf("MTC assertion bundle missing Leaf-Index header")
+	}
+	if !strings.Contains(certPEM, "Log-Origin:") {
+		return fmt.Errorf("MTC assertion bundle missing Log-Origin header")
+	}
+
+	if c.verbose {
+		// Extract and display the assertion bundle summary.
+		bundleStart := strings.Index(certPEM, "-----BEGIN MTC ASSERTION BUNDLE-----")
+		bundleEnd := strings.Index(certPEM, "-----END MTC ASSERTION BUNDLE-----")
+		if bundleStart >= 0 && bundleEnd > bundleStart {
+			bundle := certPEM[bundleStart : bundleEnd+len("-----END MTC ASSERTION BUNDLE-----")]
+			lines := strings.Split(bundle, "\n")
+			for _, line := range lines {
+				if strings.HasPrefix(line, "Leaf-Index:") ||
+					strings.HasPrefix(line, "Tree-Size:") ||
+					strings.HasPrefix(line, "Log-Origin:") {
+					fmt.Printf("    %s\n", line)
+				}
+			}
+		}
+		fmt.Printf("    FULL MTC FLOW COMPLETE: cert issued via DigiCert CA → logged in Merkle tree → assertion bundle attached\n")
+	}
+
+	return nil
 }

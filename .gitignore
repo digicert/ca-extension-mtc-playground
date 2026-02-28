@@ -25,4 +25,9 @@ docker-compose.override.yml
 
 # Secrets
 *.key
+.env
 !config.example.yaml
+
+# Generated TLS certs
+acme-cert.pem
+acme-key.pem
