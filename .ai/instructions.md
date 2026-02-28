@@ -62,6 +62,7 @@ This is an **experimental/internal** implementation — simplified scope (no ext
 | `internal/assertion` | Assertion bundle builder + JSON/PEM formatter + proof verifier |
 | `internal/certutil` | X.509 DER parser for certificate metadata extraction (stdlib only) |
 | `internal/assertionissuer` | Background assertion generation pipeline: batch build, freshness tracking, webhooks |
+| `internal/acme` | RFC 8555 ACME server: JWS verification, nonce management, account/order/challenge handlers, CA proxy, certificate+assertion delivery |
 
 ## Critical Invariants
 

@@ -117,60 +117,24 @@ Watcher detects new cert → appends to log → new checkpoint created
 
 ---
 
-## Phase 3 — ACME Server Integration
+## Phase 3 — ACME Server Integration (COMPLETE)
 
 **Goal:** Deliver assertion bundles to web servers via the ACME protocol, so servers can staple MTC proofs to TLS handshakes without manual intervention.
 
-### Approach
+**Delivered:**
+- `internal/acme` — RFC 8555 ACME server (6 files, 1,173 lines)
+  - JWS verification (ES256 + RS256), nonce management, account/order/authorization/challenge handlers
+  - CA proxy (finalize → DigiCert CA REST API), assertion bundle waiting
+  - Certificate download with appended assertion bundle PEM
+- 4 ACME tables in `internal/store` with 6 indexes and ~16 CRUD methods
+- `ACMEConfig` in `internal/config` with 12 fields and sensible defaults
+- Wired into `cmd/mtc-bridge` on separate port (:8443)
+- 5 new conformance tests (22 total)
+- Auto-approve challenge mode for internal CA development
 
-Build a lightweight ACME server (RFC 8555 subset) that:
-1. Accepts standard ACME certificate orders
-2. Proxies the CSR to DigiCert Private CA for issuance
-3. Waits for mtc-bridge to ingest the cert and generate an assertion bundle
-4. Returns the certificate + assertion bundle together in the ACME finalize response
+**Status:** Committed on `main`.
 
-### Key Design Decisions
-
-- **Post-issuance stapling**: The ACME server does NOT modify the CA. It issues a normal X.509 cert, then waits for the assertion pipeline (Phase 2) to produce a proof.
-- **Polling loop**: After cert issuance, the ACME server polls `GET /assertions/pending` until the bundle appears (typically <60s).
-- **Bundle delivery**: The assertion bundle is returned as an additional field in the ACME order object, or as a separate download URL.
-- **Challenge types**: Initially support `http-01` only. DNS challenges can be added later.
-
-### Deliverables
-
-1. `internal/acme` — ACME server implementation (RFC 8555 subset)
-   - Directory, newNonce, newAccount, newOrder, authz, challenge, finalize, certificate
-   - JWS request validation
-   - http-01 challenge verification
-2. `cmd/mtc-acme` — standalone ACME server binary (or integrated into mtc-bridge)
-3. Config section for ACME endpoints, CA proxy settings
-4. Integration tests with a standard ACME client (certbot or lego)
-5. Conformance tests for ACME protocol basics
-
-### Data Flow
-
-```
-ACME Client (certbot/lego)
-    │
-    ▼
-mtc-acme Server (:8443)
-    │
-    ├── newOrder → create order, return authz
-    ├── challenge → verify http-01
-    ├── finalize → proxy CSR to DigiCert CA
-    │               │
-    │               ▼
-    │         DigiCert CA issues cert
-    │               │
-    │               ▼
-    │         mtc-bridge watcher ingests cert
-    │               │
-    │               ▼
-    │         Assertion issuer generates bundle
-    │               │
-    │               ▼
-    └── certificate → return cert + assertion bundle
-```
+See [phase3-acme-server.md](phase3-acme-server.md) for full details.
 
 ---
 
@@ -198,13 +162,10 @@ mtc-acme Server (:8443)
 ## Timeline & Dependencies
 
 ```
-Phase 1 (DONE) ──► Phase 2 (assertion issuer)
-                        │
-                        ▼
-                   Phase 3 (ACME server) ──► Phase 4 (TLS, deferred)
+Phase 1 (DONE) ──► Phase 2 (DONE) ──► Phase 3 (DONE) ──► Phase 4 (TLS, deferred)
 ```
 
 - Phase 2 depends on Phase 1's assertion package and store methods
 - Phase 3 depends on Phase 2's polling endpoint and assertion store
 - Phase 4 depends on Phase 3 for end-to-end cert + assertion delivery
-- Phases 1-3 are implemented continuously; Phase 4 paused pending TLS ecosystem readiness
+- Phases 1-3 are complete; Phase 4 paused pending TLS ecosystem readiness

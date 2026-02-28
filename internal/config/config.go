@@ -39,6 +39,48 @@ type Config struct {
 
 	// AssertionIssuer configures the background assertion generation pipeline.
 	AssertionIssuer AssertionIssuerConfig `yaml:"assertion_issuer"`
+
+	// ACME configures the optional ACME server for RFC 8555 certificate issuance.
+	ACME ACMEConfig `yaml:"acme"`
+}
+
+// ACMEConfig configures the ACME server.
+type ACMEConfig struct {
+	// Enabled turns the ACME server on/off (default: false).
+	Enabled bool `yaml:"enabled"`
+
+	// Addr is the listen address for the ACME server (e.g., ":8443").
+	Addr string `yaml:"addr"`
+
+	// ExternalURL is the base URL clients use to reach this ACME server.
+	ExternalURL string `yaml:"external_url"`
+
+	// CAURL is the DigiCert Private CA REST API base URL.
+	CAURL string `yaml:"ca_url"`
+
+	// CAAPIKey is the DigiCert CA API key.
+	CAAPIKey string `yaml:"ca_api_key"`
+
+	// CAID is the issuing CA ID in DigiCert.
+	CAID string `yaml:"ca_id"`
+
+	// TemplateID is the certificate template ID.
+	TemplateID string `yaml:"template_id"`
+
+	// MTCBridgeURL is the base URL of the mtc-bridge for assertion lookups (e.g., "http://localhost:8080").
+	MTCBridgeURL string `yaml:"mtc_bridge_url"`
+
+	// OrderExpiry is how long an order stays valid (default: 24h).
+	OrderExpiry time.Duration `yaml:"order_expiry"`
+
+	// AssertionTimeout is how long to wait for an assertion bundle after cert issuance (default: 5m).
+	AssertionTimeout time.Duration `yaml:"assertion_timeout"`
+
+	// AssertionPollInterval is how often to poll for assertion bundles (default: 5s).
+	AssertionPollInterval time.Duration `yaml:"assertion_poll_interval"`
+
+	// AutoApproveChallenge skips real http-01 validation (for internal CAs).
+	AutoApproveChallenge bool `yaml:"auto_approve_challenge"`
 }
 
 // AssertionIssuerConfig configures the background assertion generation pipeline.
@@ -319,6 +361,26 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.AssertionIssuer.StalenessThreshold <= 0 {
 		cfg.AssertionIssuer.StalenessThreshold = 5
+	}
+
+	// ACME defaults.
+	if cfg.ACME.Addr == "" {
+		cfg.ACME.Addr = ":8443"
+	}
+	if cfg.ACME.ExternalURL == "" {
+		cfg.ACME.ExternalURL = "http://localhost:8443"
+	}
+	if cfg.ACME.MTCBridgeURL == "" {
+		cfg.ACME.MTCBridgeURL = "http://localhost:8080"
+	}
+	if cfg.ACME.OrderExpiry <= 0 {
+		cfg.ACME.OrderExpiry = 24 * time.Hour
+	}
+	if cfg.ACME.AssertionTimeout <= 0 {
+		cfg.ACME.AssertionTimeout = 5 * time.Minute
+	}
+	if cfg.ACME.AssertionPollInterval <= 0 {
+		cfg.ACME.AssertionPollInterval = 5 * time.Second
 	}
 }
 

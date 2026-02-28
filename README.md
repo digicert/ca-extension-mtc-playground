@@ -37,6 +37,13 @@ focused on transparency and auditability.
 | Assertion polling endpoint | Phase 2 | `GET /assertions/pending` for downstream consumers |
 | Webhook notifications | Phase 2 | Push notifications with HMAC-SHA256 signing when assertions are ready |
 | Assertion statistics | Phase 2 | `GET /assertions/stats` + admin dashboard metrics |
+| ACME server (RFC 8555) | Phase 3 / MTC §7 | Standalone ACME endpoint on separate port with full order lifecycle |
+| JWS request verification | Phase 3 / RFC 7515 | ES256 + RS256 with JWK and KID authentication |
+| Account management | Phase 3 / RFC 8555 §7.3 | Create/lookup accounts by JWK thumbprint |
+| Order lifecycle | Phase 3 / RFC 8555 §7.4 | pending → ready → processing → valid with authorization + challenge flow |
+| http-01 challenge validation | Phase 3 / RFC 8555 §8.3 | Auto-approve mode for internal CAs, real HTTP validation path |
+| CA proxy (finalize) | Phase 3 | Proxies CSR to DigiCert CA REST API, polls for assertion bundle |
+| Certificate + assertion download | Phase 3 | PEM certificate with appended assertion bundle proof |
 
 ### Not Implemented
 
@@ -46,7 +53,6 @@ focused on transparency and auditability.
 | Multi-cosigner coordination | MTC §5.5 | Only single local cosigner supported |
 | TLS 1.3 integration | MTC §6 | Requires TLS library modifications |
 | Signatureless certificates | MTC §4 | Needs TLS handshake integration to be useful |
-| ACME MTC extensions | MTC §7 | Planned for Phase 3 |
 | Browser relying-party logic | MTC §8 | Requires browser/client-side implementation |
 | Consistency proofs | RFC 9162 §2.1.4 | Not yet implemented (inclusion proofs only) |
 
@@ -90,14 +96,25 @@ focused on transparency and auditability.
                             │    ┌────▼────┐    │
                             │    │webhooks │    │──► POST to configured URLs
                             │    │(optional│    │   HMAC-SHA256 signed
-                            │    └─────────┘    │
+                            │    └────┬────┘    │
+                            │         │         │
+                            │  ┌──────▼──────┐  │
+                            │  │ ACME server │  │──► HTTP :8443
+                            │  │ (Phase 3)   │  │    /acme/directory
+                            │  │ RFC 8555    │  │    /acme/new-account
+                            │  │ JWS verify  │──│──► DigiCert CA REST API
+                            │  │ CA proxy    │  │    (finalize → issue cert)
+                            │  └─────────────┘  │
                             └──────────────────┘
 ```
 
 **Data flow:** The watcher polls the DigiCert CA's MariaDB for new certificates
 and revocations. Each new certificate is appended to the Merkle tree in
 PostgreSQL. Checkpoints are signed with Ed25519 and served over HTTP alongside
-tile data and inclusion proofs.
+tile data and inclusion proofs. The ACME server (Phase 3) runs on a separate
+port and provides RFC 8555 certificate issuance — it proxies finalize requests
+to the DigiCert CA, then waits for the assertion issuer to build the inclusion
+proof bundle before delivering the certificate with its MTC proof.
 
 ---
 
@@ -139,6 +156,7 @@ make run
 
 The service starts on `http://localhost:8080`. It will immediately begin
 ingesting certificates from the CA database and building the Merkle tree.
+The ACME server starts on `http://localhost:8443` (configurable via `acme.addr`).
 
 ---
 
@@ -509,8 +527,70 @@ Target: http://localhost:8080
   assertion_auto_generation      [PASS]
   assertion_polling              [PASS]
   assertion_stats                [PASS]
+  acme_directory                 [PASS]
+  acme_nonce                     [PASS]
+  acme_new_account               [PASS]
+  acme_new_order                 [PASS]
+  acme_order_flow                [PASS]
 
-Results: 17 passed, 0 failed, 0 skipped
+Results: 22 passed, 0 failed, 0 skipped
+```
+
+### Step 15 — ACME Server: Directory & Nonce
+
+The ACME server runs on a separate port (default 8443) and implements
+RFC 8555 for automated certificate issuance.
+
+```bash
+export ACME_URL="http://localhost:8443"
+
+# Fetch the ACME directory
+curl -s $ACME_URL/acme/directory | python3 -m json.tool
+```
+
+Example output:
+
+```json
+{
+  "newAccount": "http://localhost:8443/acme/new-account",
+  "newNonce": "http://localhost:8443/acme/new-nonce",
+  "newOrder": "http://localhost:8443/acme/new-order",
+  "meta": {
+    "externalAccountRequired": false,
+    "website": "http://localhost:8443"
+  }
+}
+```
+
+```bash
+# Get a replay-protection nonce
+curl -sI $ACME_URL/acme/new-nonce | grep -i replay-nonce
+```
+
+### Step 16 — ACME Order Lifecycle (via conformance test)
+
+The ACME conformance tests exercise the full order lifecycle:
+
+1. **Create account** — JWS-signed POST with ephemeral ECDSA P-256 key
+2. **Create order** — Request certificate for DNS identifiers
+3. **Get authorization** — Retrieve http-01 challenge for each identifier
+4. **Trigger validation** — POST to challenge URL (auto-approved in dev mode)
+5. **Poll order** — Wait for status to transition from `pending` → `ready`
+6. **Finalize** — Submit CSR; ACME server proxies to DigiCert CA
+7. **Download certificate** — Get PEM certificate with appended assertion bundle
+
+Run just the ACME tests:
+
+```bash
+./bin/mtc-conformance -url http://localhost:8080 -acme-url http://localhost:8443 -verbose 2>&1 | grep acme
+```
+
+```
+  acme_directory                 [PASS]
+  acme_nonce                     [PASS]
+  acme_new_account               [PASS]
+  acme_new_order                 [PASS]
+  acme_order_flow                [PASS]
 ```
 
 ---
@@ -532,6 +612,20 @@ Results: 17 passed, 0 failed, 0 skipped
 | GET | `/admin/certs` | Certificate browser with search |
 | GET | `/admin/certs/{index}` | Certificate detail page with assertion bundle |
 | GET | `/healthz` | Health check |
+
+### ACME Server Endpoints (port 8443)
+
+| Method | Endpoint | Description |
+|---|---|---|
+| GET | `/acme/directory` | ACME directory (RFC 8555 §7.1.1) |
+| HEAD/GET | `/acme/new-nonce` | Get a fresh anti-replay nonce |
+| POST | `/acme/new-account` | Create or lookup an account (JWS with JWK) |
+| POST | `/acme/new-order` | Create a new certificate order |
+| POST | `/acme/order/{id}` | Get order status |
+| POST | `/acme/authz/{id}` | Get authorization with challenges |
+| POST | `/acme/challenge/{id}` | Trigger challenge validation |
+| POST | `/acme/order/{id}/finalize` | Submit CSR to finalize order |
+| POST | `/acme/certificate/{id}` | Download certificate + assertion bundle PEM |
 
 ### Checkpoint Format
 
@@ -629,9 +723,10 @@ to fetch the full bundle.
 ```
 cmd/
   mtc-bridge/          Main service binary
-  mtc-conformance/     Conformance test client (17 tests)
+  mtc-conformance/     Conformance test client (22 tests)
   mtc-assertion/       CLI tool: fetch, verify, inspect assertion bundles
 internal/
+  acme/                RFC 8555 ACME server (JWS, nonce, accounts, orders, challenges, CA proxy)
   admin/               HTMX dashboard + certificate browser
   assertion/           Assertion bundle builder + JSON/PEM formatter
   assertionissuer/     Background assertion generation pipeline + webhooks
@@ -642,7 +737,7 @@ internal/
   issuancelog/         Entry construction + Merkle tree maintenance
   merkle/              RFC 9162 Merkle tree operations + inclusion proofs
   revocation/          Revocation bitfield construction
-  store/               PostgreSQL state store (7 tables, search/detail/assertion queries)
+  store/               PostgreSQL state store (11 tables, search/detail/assertion/ACME queries)
   tlogtiles/           C2SP tlog-tiles HTTP handler + proof + assertion API
   watcher/             CA database poller (certs + revocations)
 docs/
@@ -667,6 +762,7 @@ sections:
 - **`watcher`** — Polling intervals for certificates and revocations
 - **`cosigner`** — Ed25519 key file path and key ID
 - **`assertion_issuer`** — Assertion generation pipeline (batch size, concurrency, webhooks)
+- **`acme`** — ACME server settings (port, CA proxy URL, API key, CA/template IDs, auto-approve)
 - **`http`** — Listen address, timeouts, cache TTLs
 
 Environment variables can override config values (see `docker-compose.yml` for
@@ -680,7 +776,7 @@ the full list).
 # Unit tests (44+ tests across merkle, config, cosigner, certutil, tlogtiles packages)
 make test
 
-# Conformance tests (17 tests, requires a running mtc-bridge instance)
+# Conformance tests (22 tests, requires a running mtc-bridge instance)
 make conformance
 
 # Go vet

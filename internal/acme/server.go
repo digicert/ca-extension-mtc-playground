@@ -1,0 +1,74 @@
+package acme
+
+import (
+	"log/slog"
+	"net/http"
+	"sync"
+	"time"
+
+	"github.com/briantrzupek/ca-extension-merkle/internal/store"
+)
+
+// Config holds ACME server configuration.
+type Config struct {
+	ExternalURL           string
+	CAProxyURL            string
+	CAAPIKey              string
+	CAID                  string
+	TemplateID            string
+	MTCBridgeURL          string
+	OrderExpiry           time.Duration
+	AssertionTimeout      time.Duration
+	AssertionPollInterval time.Duration
+	AutoApproveChallenge  bool
+}
+
+// Server is the ACME server.
+type Server struct {
+	store  *store.Store
+	cfg    Config
+	logger *slog.Logger
+	mux    *http.ServeMux
+	mu     sync.Mutex
+	nonces map[string]time.Time
+}
+
+// New creates a new ACME server.
+func New(s *store.Store, cfg Config, logger *slog.Logger) *Server {
+	if cfg.OrderExpiry <= 0 {
+		cfg.OrderExpiry = 24 * time.Hour
+	}
+	if cfg.AssertionTimeout <= 0 {
+		cfg.AssertionTimeout = 5 * time.Minute
+	}
+	if cfg.AssertionPollInterval <= 0 {
+		cfg.AssertionPollInterval = 5 * time.Second
+	}
+	srv := &Server{
+		store:  s,
+		cfg:    cfg,
+		logger: logger,
+		mux:    http.NewServeMux(),
+		nonces: make(map[string]time.Time),
+	}
+	srv.mux.HandleFunc("GET /acme/directory", srv.handleDirectory)
+	srv.mux.HandleFunc("HEAD /acme/new-nonce", srv.handleNewNonce)
+	srv.mux.HandleFunc("GET /acme/new-nonce", srv.handleNewNonce)
+	srv.mux.HandleFunc("POST /acme/new-nonce", srv.handleNewNonce)
+	srv.mux.HandleFunc("POST /acme/new-account", srv.handleNewAccount)
+	srv.mux.HandleFunc("POST /acme/new-order", srv.handleNewOrder)
+	srv.mux.HandleFunc("POST /acme/order/{id}", srv.handleOrder)
+	srv.mux.HandleFunc("POST /acme/order/{id}/finalize", srv.handleFinalize)
+	srv.mux.HandleFunc("POST /acme/authz/{id}", srv.handleAuthorization)
+	srv.mux.HandleFunc("POST /acme/challenge/{id}", srv.handleChallenge)
+	srv.mux.HandleFunc("POST /acme/certificate/{id}", srv.handleCertificate)
+	go srv.cleanupNonces()
+	return srv
+}
+
+// ServeHTTP implements http.Handler.
+func (srv *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Replay-Nonce", srv.newNonce())
+	w.Header().Set("Content-Type", "application/json")
+	srv.mux.ServeHTTP(w, r)
+}

@@ -6,6 +6,10 @@
 package main
 
 import (
+	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
@@ -25,11 +29,13 @@ const hashSize = 32
 
 func main() {
 	baseURL := flag.String("url", "http://localhost:8080", "base URL of the tlog-tiles server")
+	acmeURL := flag.String("acme-url", "http://localhost:8443", "base URL of the ACME server")
 	verbose := flag.Bool("verbose", false, "verbose output")
 	flag.Parse()
 
 	c := &conformanceClient{
 		baseURL: strings.TrimRight(*baseURL, "/"),
+		acmeURL: strings.TrimRight(*acmeURL, "/"),
 		verbose: *verbose,
 		client:  &http.Client{Timeout: 30 * time.Second},
 	}
@@ -60,6 +66,11 @@ func main() {
 		{"assertion_auto_generation", c.testAssertionAutoGeneration},
 		{"assertion_polling", c.testAssertionPolling},
 		{"assertion_stats", c.testAssertionStats},
+		{"acme_directory", c.testACMEDirectory},
+		{"acme_nonce", c.testACMENonce},
+		{"acme_new_account", c.testACMENewAccount},
+		{"acme_new_order", c.testACMENewOrder},
+		{"acme_order_flow", c.testACMEOrderFlow},
 	}
 
 	for _, tt := range tests {
@@ -87,6 +98,7 @@ var errSkipped = fmt.Errorf("skipped")
 
 type conformanceClient struct {
 	baseURL  string
+	acmeURL  string
 	verbose  bool
 	client   *http.Client
 	treeSize int64
@@ -758,4 +770,352 @@ func (c *conformanceClient) testAssertionStats() error {
 	}
 
 	return nil
+}
+
+// --- ACME JWS Helpers ---
+
+func (c *conformanceClient) acmeKey() (*ecdsa.PrivateKey, error) {
+	return ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+}
+
+func acmeJWK(pub *ecdsa.PublicKey) json.RawMessage {
+	x := base64.RawURLEncoding.EncodeToString(pub.X.Bytes())
+	y := base64.RawURLEncoding.EncodeToString(pub.Y.Bytes())
+	jwk := fmt.Sprintf(`{"kty":"EC","crv":"P-256","x":"%s","y":"%s"}`, x, y)
+	return json.RawMessage(jwk)
+}
+
+func (c *conformanceClient) acmeNonce() (string, error) {
+	resp, err := c.client.Head(c.acmeURL + "/acme/new-nonce")
+	if err != nil {
+		return "", err
+	}
+	resp.Body.Close()
+	nonce := resp.Header.Get("Replay-Nonce")
+	if nonce == "" {
+		return "", fmt.Errorf("no Replay-Nonce header")
+	}
+	return nonce, nil
+}
+
+func (c *conformanceClient) acmePost(url string, key *ecdsa.PrivateKey, payload interface{}, useKID string) ([]byte, int, http.Header, error) {
+	nonce, err := c.acmeNonce()
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("get nonce: %w", err)
+	}
+	hdr := map[string]interface{}{
+		"alg":   "ES256",
+		"nonce": nonce,
+		"url":   url,
+	}
+	if useKID != "" {
+		hdr["kid"] = useKID
+	} else {
+		hdr["jwk"] = json.RawMessage(acmeJWK(&key.PublicKey))
+	}
+	hdrJSON, _ := json.Marshal(hdr)
+	protected := base64.RawURLEncoding.EncodeToString(hdrJSON)
+
+	var payloadStr string
+	if payload != nil {
+		payloadJSON, _ := json.Marshal(payload)
+		payloadStr = base64.RawURLEncoding.EncodeToString(payloadJSON)
+	}
+
+	sigInput := protected + "." + payloadStr
+	hash := sha256.Sum256([]byte(sigInput))
+	rInt, sInt, err := ecdsa.Sign(rand.Reader, key, hash[:])
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("sign: %w", err)
+	}
+	rB := rInt.Bytes()
+	sB := sInt.Bytes()
+	sig := make([]byte, 64)
+	copy(sig[32-len(rB):32], rB)
+	copy(sig[64-len(sB):64], sB)
+	sigB64 := base64.RawURLEncoding.EncodeToString(sig)
+
+	jwsBody := fmt.Sprintf(`{"protected":"%s","payload":"%s","signature":"%s"}`, protected, payloadStr, sigB64)
+	req, err := http.NewRequest("POST", url, bytes.NewReader([]byte(jwsBody)))
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/jose+json")
+	resp, err := c.client.Do(req)
+	if err != nil {
+		return nil, 0, nil, err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	return body, resp.StatusCode, resp.Header, err
+}
+
+// --- ACME Conformance Tests ---
+
+func (c *conformanceClient) testACMEDirectory() error {
+	resp, err := c.client.Get(c.acmeURL + "/acme/directory")
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+	var dir map[string]interface{}
+	if err := json.Unmarshal(body, &dir); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	for _, f := range []string{"newNonce", "newAccount", "newOrder"} {
+		if _, ok := dir[f]; !ok {
+			return fmt.Errorf("missing required field: %s", f)
+		}
+	}
+	if c.verbose {
+		fmt.Printf("    directory: %s\n", string(body))
+	}
+	return nil
+}
+
+func (c *conformanceClient) testACMENonce() error {
+	nonce, err := c.acmeNonce()
+	if err != nil {
+		return err
+	}
+	if len(nonce) < 10 {
+		return fmt.Errorf("nonce too short: %q", nonce)
+	}
+	nonce2, err := c.acmeNonce()
+	if err != nil {
+		return err
+	}
+	if nonce == nonce2 {
+		return fmt.Errorf("two nonces are identical")
+	}
+	if c.verbose {
+		fmt.Printf("    nonce1=%s nonce2=%s\n", nonce, nonce2)
+	}
+	return nil
+}
+
+func (c *conformanceClient) testACMENewAccount() error {
+	key, err := c.acmeKey()
+	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+	payload := map[string]interface{}{
+		"termsOfServiceAgreed": true,
+		"contact":              []string{"mailto:test@example.com"},
+	}
+	body, status, headers, err := c.acmePost(c.acmeURL+"/acme/new-account", key, payload, "")
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if status != 201 {
+		return fmt.Errorf("expected 201, got %d: %s", status, string(body))
+	}
+	loc := headers.Get("Location")
+	if loc == "" {
+		return fmt.Errorf("no Location header")
+	}
+	var acct map[string]interface{}
+	if err := json.Unmarshal(body, &acct); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+	if acct["status"] != "valid" {
+		return fmt.Errorf("expected status=valid, got %v", acct["status"])
+	}
+	// Re-register same key should return existing (200).
+	body2, status2, _, err := c.acmePost(c.acmeURL+"/acme/new-account", key, payload, "")
+	if err != nil {
+		return fmt.Errorf("second request failed: %w", err)
+	}
+	if status2 != 200 {
+		return fmt.Errorf("expected 200 for existing account, got %d: %s", status2, string(body2))
+	}
+	if c.verbose {
+		fmt.Printf("    account: %s\n", loc)
+	}
+	return nil
+}
+
+func (c *conformanceClient) testACMENewOrder() error {
+	key, err := c.acmeKey()
+	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+	// Create account.
+	acctPayload := map[string]interface{}{
+		"termsOfServiceAgreed": true,
+		"contact":              []string{"mailto:order-test@example.com"},
+	}
+	_, status, headers, err := c.acmePost(c.acmeURL+"/acme/new-account", key, acctPayload, "")
+	if err != nil {
+		return fmt.Errorf("create account: %w", err)
+	}
+	if status != 201 && status != 200 {
+		return fmt.Errorf("account creation failed: %d", status)
+	}
+	kid := headers.Get("Location")
+
+	// Create order.
+	orderPayload := map[string]interface{}{
+		"identifiers": []map[string]string{
+			{"type": "dns", "value": "test.example.com"},
+		},
+	}
+	body, status, orderHeaders, err := c.acmePost(c.acmeURL+"/acme/new-order", key, orderPayload, kid)
+	if err != nil {
+		return fmt.Errorf("create order: %w", err)
+	}
+	if status != 201 {
+		return fmt.Errorf("expected 201, got %d: %s", status, string(body))
+	}
+	orderLoc := orderHeaders.Get("Location")
+	if orderLoc == "" {
+		return fmt.Errorf("no order Location header")
+	}
+	var order map[string]interface{}
+	if err := json.Unmarshal(body, &order); err != nil {
+		return fmt.Errorf("invalid order JSON: %w", err)
+	}
+	if order["status"] != "pending" {
+		return fmt.Errorf("expected status=pending, got %v", order["status"])
+	}
+	authzs, ok := order["authorizations"].([]interface{})
+	if !ok || len(authzs) == 0 {
+		return fmt.Errorf("expected authorizations array")
+	}
+	if _, ok := order["finalize"]; !ok {
+		return fmt.Errorf("missing finalize URL")
+	}
+	if c.verbose {
+		fmt.Printf("    order: %s authzs=%d\n", orderLoc, len(authzs))
+	}
+	return nil
+}
+
+func (c *conformanceClient) testACMEOrderFlow() error {
+	key, err := c.acmeKey()
+	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+
+	// Step 1: Create account.
+	acctPayload := map[string]interface{}{
+		"termsOfServiceAgreed": true,
+		"contact":              []string{"mailto:flow-test@example.com"},
+	}
+	_, status, headers, err := c.acmePost(c.acmeURL+"/acme/new-account", key, acctPayload, "")
+	if err != nil {
+		return fmt.Errorf("create account: %w", err)
+	}
+	if status != 201 && status != 200 {
+		return fmt.Errorf("account creation failed: %d", status)
+	}
+	kid := headers.Get("Location")
+	if c.verbose {
+		fmt.Printf("    account: %s\n", kid)
+	}
+
+	// Step 2: Create order.
+	orderPayload := map[string]interface{}{
+		"identifiers": []map[string]string{
+			{"type": "dns", "value": "flow-test.example.com"},
+		},
+	}
+	body, status, orderHeaders, err := c.acmePost(c.acmeURL+"/acme/new-order", key, orderPayload, kid)
+	if err != nil {
+		return fmt.Errorf("create order: %w", err)
+	}
+	if status != 201 {
+		return fmt.Errorf("expected 201, got %d: %s", status, string(body))
+	}
+	orderLoc := orderHeaders.Get("Location")
+
+	var order map[string]interface{}
+	if err := json.Unmarshal(body, &order); err != nil {
+		return fmt.Errorf("invalid order JSON: %w", err)
+	}
+	if order["status"] != "pending" {
+		return fmt.Errorf("expected order status=pending, got %v", order["status"])
+	}
+	authzs := order["authorizations"].([]interface{})
+	if c.verbose {
+		fmt.Printf("    order: %s status=pending authzs=%d\n", orderLoc, len(authzs))
+	}
+
+	// Step 3: Get authorization and find http-01 challenge.
+	authzURL := authzs[0].(string)
+	body, status, _, err = c.acmePost(authzURL, key, nil, kid)
+	if err != nil {
+		return fmt.Errorf("get authz: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("authz GET failed: %d", status)
+	}
+	var authz map[string]interface{}
+	if err := json.Unmarshal(body, &authz); err != nil {
+		return fmt.Errorf("invalid authz JSON: %w", err)
+	}
+	challenges, ok := authz["challenges"].([]interface{})
+	if !ok || len(challenges) == 0 {
+		return fmt.Errorf("no challenges found")
+	}
+	var challengeURL string
+	for _, ch := range challenges {
+		chMap := ch.(map[string]interface{})
+		if chMap["type"] == "http-01" {
+			challengeURL = chMap["url"].(string)
+			break
+		}
+	}
+	if challengeURL == "" {
+		return fmt.Errorf("no http-01 challenge found")
+	}
+	if c.verbose {
+		fmt.Printf("    challenge: %s\n", challengeURL)
+	}
+
+	// Step 4: POST challenge to trigger validation (auto-approve mode).
+	body, status, _, err = c.acmePost(challengeURL, key, map[string]interface{}{}, kid)
+	if err != nil {
+		return fmt.Errorf("post challenge: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("challenge POST failed: %d: %s", status, string(body))
+	}
+	var chResp map[string]interface{}
+	if err := json.Unmarshal(body, &chResp); err != nil {
+		return fmt.Errorf("invalid challenge response: %w", err)
+	}
+	if c.verbose {
+		fmt.Printf("    challenge status=%v\n", chResp["status"])
+	}
+
+	// Step 5: Poll order until it becomes "ready" (challenge auto-approved).
+	for i := 0; i < 10; i++ {
+		time.Sleep(500 * time.Millisecond)
+		body, status, _, err = c.acmePost(orderLoc, key, nil, kid)
+		if err != nil {
+			return fmt.Errorf("poll order: %w", err)
+		}
+		if status != 200 {
+			return fmt.Errorf("order poll failed: %d", status)
+		}
+		if err := json.Unmarshal(body, &order); err != nil {
+			return fmt.Errorf("invalid order JSON: %w", err)
+		}
+		st := order["status"].(string)
+		if c.verbose {
+			fmt.Printf("    poll %d: order status=%s\n", i+1, st)
+		}
+		if st == "ready" {
+			return nil
+		}
+		if st == "invalid" {
+			return fmt.Errorf("order became invalid")
+		}
+	}
+	return fmt.Errorf("order did not reach ready state within timeout, last status=%v", order["status"])
 }

@@ -125,6 +125,59 @@ var migrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_assertion_bundles_stale ON assertion_bundles(stale) WHERE stale = TRUE`,
 	`CREATE INDEX IF NOT EXISTS idx_assertion_bundles_checkpoint ON assertion_bundles(checkpoint_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_assertion_bundles_created ON assertion_bundles(created_at DESC)`,
+
+	// Phase 3: ACME server tables.
+	`CREATE TABLE IF NOT EXISTS acme_accounts (
+		id          TEXT PRIMARY KEY,
+		status      TEXT NOT NULL DEFAULT 'valid',
+		key_thumbprint TEXT NOT NULL UNIQUE,
+		jwk         JSONB NOT NULL,
+		contact     JSONB NOT NULL DEFAULT '[]',
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE TABLE IF NOT EXISTS acme_orders (
+		id              TEXT PRIMARY KEY,
+		account_id      TEXT NOT NULL REFERENCES acme_accounts(id),
+		status          TEXT NOT NULL DEFAULT 'pending',
+		identifiers     JSONB NOT NULL,
+		not_before      TIMESTAMPTZ,
+		not_after       TIMESTAMPTZ,
+		expires         TIMESTAMPTZ NOT NULL,
+		csr             TEXT,
+		certificate_url TEXT,
+		cert_serial     TEXT,
+		assertion_url   TEXT,
+		error_type      TEXT,
+		error_detail    TEXT,
+		created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_acme_orders_account ON acme_orders(account_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_acme_orders_status ON acme_orders(status) WHERE status IN ('pending', 'ready', 'processing')`,
+	`CREATE INDEX IF NOT EXISTS idx_acme_orders_cert_serial ON acme_orders(cert_serial) WHERE cert_serial IS NOT NULL`,
+	`CREATE TABLE IF NOT EXISTS acme_authorizations (
+		id          TEXT PRIMARY KEY,
+		order_id    TEXT NOT NULL REFERENCES acme_orders(id),
+		identifier  JSONB NOT NULL,
+		status      TEXT NOT NULL DEFAULT 'pending',
+		expires     TIMESTAMPTZ NOT NULL,
+		wildcard    BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_acme_authz_order ON acme_authorizations(order_id)`,
+	`CREATE TABLE IF NOT EXISTS acme_challenges (
+		id          TEXT PRIMARY KEY,
+		authz_id    TEXT NOT NULL REFERENCES acme_authorizations(id),
+		type        TEXT NOT NULL,
+		status      TEXT NOT NULL DEFAULT 'pending',
+		token       TEXT NOT NULL,
+		validated   TIMESTAMPTZ,
+		error_type  TEXT,
+		error_detail TEXT,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_acme_challenges_authz ON acme_challenges(authz_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_acme_challenges_token ON acme_challenges(token)`,
 }
 
 // --- Log Entries ---
@@ -1008,4 +1061,388 @@ func (s *Store) GetStats(ctx context.Context) (*Stats, error) {
 // DB returns the underlying *sql.DB for advanced use cases (e.g., transactions).
 func (s *Store) DB() *sql.DB {
 	return s.db
+}
+
+// --- ACME Types ---
+
+// ACMEAccount is an ACME account.
+type ACMEAccount struct {
+	ID            string          `json:"id"`
+	Status        string          `json:"status"`
+	KeyThumbprint string          `json:"key_thumbprint"`
+	JWK           json.RawMessage `json:"jwk"`
+	Contact       json.RawMessage `json:"contact"`
+	CreatedAt     time.Time       `json:"created_at"`
+}
+
+// ACMEOrder is an ACME order.
+type ACMEOrder struct {
+	ID             string          `json:"id"`
+	AccountID      string          `json:"account_id"`
+	Status         string          `json:"status"`
+	Identifiers    json.RawMessage `json:"identifiers"`
+	NotBefore      *time.Time      `json:"not_before,omitempty"`
+	NotAfter       *time.Time      `json:"not_after,omitempty"`
+	Expires        time.Time       `json:"expires"`
+	CSR            string          `json:"csr,omitempty"`
+	CertificateURL string          `json:"certificate_url,omitempty"`
+	CertSerial     string          `json:"cert_serial,omitempty"`
+	AssertionURL   string          `json:"assertion_url,omitempty"`
+	ErrorType      string          `json:"error_type,omitempty"`
+	ErrorDetail    string          `json:"error_detail,omitempty"`
+	CreatedAt      time.Time       `json:"created_at"`
+	UpdatedAt      time.Time       `json:"updated_at"`
+}
+
+// ACMEAuthorization is an ACME authorization.
+type ACMEAuthorization struct {
+	ID         string          `json:"id"`
+	OrderID    string          `json:"order_id"`
+	Identifier json.RawMessage `json:"identifier"`
+	Status     string          `json:"status"`
+	Expires    time.Time       `json:"expires"`
+	Wildcard   bool            `json:"wildcard"`
+	CreatedAt  time.Time       `json:"created_at"`
+}
+
+// ACMEChallenge is an ACME challenge.
+type ACMEChallenge struct {
+	ID          string     `json:"id"`
+	AuthzID     string     `json:"authz_id"`
+	Type        string     `json:"type"`
+	Status      string     `json:"status"`
+	Token       string     `json:"token"`
+	Validated   *time.Time `json:"validated,omitempty"`
+	ErrorType   string     `json:"error_type,omitempty"`
+	ErrorDetail string     `json:"error_detail,omitempty"`
+	CreatedAt   time.Time  `json:"created_at"`
+}
+
+// --- ACME Account Methods ---
+
+// CreateACMEAccount inserts a new ACME account.
+func (s *Store) CreateACMEAccount(ctx context.Context, acct *ACMEAccount) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO acme_accounts (id, status, key_thumbprint, jwk, contact)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		acct.ID, acct.Status, acct.KeyThumbprint, acct.JWK, acct.Contact,
+	)
+	if err != nil {
+		return fmt.Errorf("store.CreateACMEAccount: %w", err)
+	}
+	return nil
+}
+
+// GetACMEAccount retrieves an ACME account by ID.
+func (s *Store) GetACMEAccount(ctx context.Context, id string) (*ACMEAccount, error) {
+	var acct ACMEAccount
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, status, key_thumbprint, jwk, contact, created_at
+		 FROM acme_accounts WHERE id = $1`, id).
+		Scan(&acct.ID, &acct.Status, &acct.KeyThumbprint, &acct.JWK, &acct.Contact, &acct.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetACMEAccount: %w", err)
+	}
+	return &acct, nil
+}
+
+// GetACMEAccountByThumbprint retrieves an ACME account by key thumbprint.
+func (s *Store) GetACMEAccountByThumbprint(ctx context.Context, thumbprint string) (*ACMEAccount, error) {
+	var acct ACMEAccount
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, status, key_thumbprint, jwk, contact, created_at
+		 FROM acme_accounts WHERE key_thumbprint = $1`, thumbprint).
+		Scan(&acct.ID, &acct.Status, &acct.KeyThumbprint, &acct.JWK, &acct.Contact, &acct.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetACMEAccountByThumbprint: %w", err)
+	}
+	return &acct, nil
+}
+
+// --- ACME Order Methods ---
+
+// CreateACMEOrder inserts a new ACME order with its authorizations and challenges.
+func (s *Store) CreateACMEOrder(ctx context.Context, order *ACMEOrder, authzs []*ACMEAuthorization, challenges []*ACMEChallenge) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store.CreateACMEOrder: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO acme_orders (id, account_id, status, identifiers, not_before, not_after, expires)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		order.ID, order.AccountID, order.Status, order.Identifiers, order.NotBefore, order.NotAfter, order.Expires,
+	)
+	if err != nil {
+		return fmt.Errorf("store.CreateACMEOrder: order: %w", err)
+	}
+
+	for _, authz := range authzs {
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO acme_authorizations (id, order_id, identifier, status, expires, wildcard)
+			 VALUES ($1, $2, $3, $4, $5, $6)`,
+			authz.ID, authz.OrderID, authz.Identifier, authz.Status, authz.Expires, authz.Wildcard,
+		)
+		if err != nil {
+			return fmt.Errorf("store.CreateACMEOrder: authz %s: %w", authz.ID, err)
+		}
+	}
+
+	for _, ch := range challenges {
+		_, err = tx.ExecContext(ctx,
+			`INSERT INTO acme_challenges (id, authz_id, type, status, token)
+			 VALUES ($1, $2, $3, $4, $5)`,
+			ch.ID, ch.AuthzID, ch.Type, ch.Status, ch.Token,
+		)
+		if err != nil {
+			return fmt.Errorf("store.CreateACMEOrder: challenge %s: %w", ch.ID, err)
+		}
+	}
+
+	return tx.Commit()
+}
+
+// GetACMEOrder retrieves an ACME order by ID.
+func (s *Store) GetACMEOrder(ctx context.Context, id string) (*ACMEOrder, error) {
+	var o ACMEOrder
+	var nb, na sql.NullTime
+	var csr, certURL, certSerial, assertionURL, errType, errDetail sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, account_id, status, identifiers, not_before, not_after, expires,
+		        csr, certificate_url, cert_serial, assertion_url, error_type, error_detail,
+		        created_at, updated_at
+		 FROM acme_orders WHERE id = $1`, id).
+		Scan(&o.ID, &o.AccountID, &o.Status, &o.Identifiers, &nb, &na, &o.Expires,
+			&csr, &certURL, &certSerial, &assertionURL, &errType, &errDetail,
+			&o.CreatedAt, &o.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetACMEOrder: %w", err)
+	}
+	if nb.Valid {
+		o.NotBefore = &nb.Time
+	}
+	if na.Valid {
+		o.NotAfter = &na.Time
+	}
+	o.CSR = csr.String
+	o.CertificateURL = certURL.String
+	o.CertSerial = certSerial.String
+	o.AssertionURL = assertionURL.String
+	o.ErrorType = errType.String
+	o.ErrorDetail = errDetail.String
+	return &o, nil
+}
+
+// UpdateACMEOrderStatus updates the status and related fields of an ACME order.
+func (s *Store) UpdateACMEOrderStatus(ctx context.Context, id, status string, updates map[string]interface{}) error {
+	// Build a minimal dynamic update. Only known safe columns are accepted.
+	set := "status = $2, updated_at = NOW()"
+	args := []interface{}{id, status}
+	i := 3
+	for _, col := range []string{"csr", "certificate_url", "cert_serial", "assertion_url", "error_type", "error_detail"} {
+		if v, ok := updates[col]; ok {
+			set += fmt.Sprintf(", %s = $%d", col, i)
+			args = append(args, v)
+			i++
+		}
+	}
+	_, err := s.db.ExecContext(ctx,
+		fmt.Sprintf("UPDATE acme_orders SET %s WHERE id = $1", set), args...)
+	if err != nil {
+		return fmt.Errorf("store.UpdateACMEOrderStatus: %w", err)
+	}
+	return nil
+}
+
+// ListACMEOrdersByAccount returns orders for an account.
+func (s *Store) ListACMEOrdersByAccount(ctx context.Context, accountID string, limit int) ([]*ACMEOrder, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, account_id, status, identifiers, not_before, not_after, expires,
+		        csr, certificate_url, cert_serial, assertion_url, error_type, error_detail,
+		        created_at, updated_at
+		 FROM acme_orders WHERE account_id = $1
+		 ORDER BY created_at DESC LIMIT $2`, accountID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store.ListACMEOrdersByAccount: %w", err)
+	}
+	defer rows.Close()
+	return scanACMEOrders(rows)
+}
+
+// FindACMEOrderBySerial returns orders matching a cert serial.
+func (s *Store) FindACMEOrderBySerial(ctx context.Context, serial string) (*ACMEOrder, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, account_id, status, identifiers, not_before, not_after, expires,
+		        csr, certificate_url, cert_serial, assertion_url, error_type, error_detail,
+		        created_at, updated_at
+		 FROM acme_orders WHERE cert_serial = $1 LIMIT 1`, serial)
+	if err != nil {
+		return nil, fmt.Errorf("store.FindACMEOrderBySerial: %w", err)
+	}
+	defer rows.Close()
+	orders, err := scanACMEOrders(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(orders) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return orders[0], nil
+}
+
+func scanACMEOrders(rows *sql.Rows) ([]*ACMEOrder, error) {
+	var orders []*ACMEOrder
+	for rows.Next() {
+		var o ACMEOrder
+		var nb, na sql.NullTime
+		var csr, certURL, certSerial, assertionURL, errType, errDetail sql.NullString
+		if err := rows.Scan(&o.ID, &o.AccountID, &o.Status, &o.Identifiers, &nb, &na, &o.Expires,
+			&csr, &certURL, &certSerial, &assertionURL, &errType, &errDetail,
+			&o.CreatedAt, &o.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scanACMEOrders: %w", err)
+		}
+		if nb.Valid {
+			o.NotBefore = &nb.Time
+		}
+		if na.Valid {
+			o.NotAfter = &na.Time
+		}
+		o.CSR = csr.String
+		o.CertificateURL = certURL.String
+		o.CertSerial = certSerial.String
+		o.AssertionURL = assertionURL.String
+		o.ErrorType = errType.String
+		o.ErrorDetail = errDetail.String
+		orders = append(orders, &o)
+	}
+	return orders, rows.Err()
+}
+
+// --- ACME Authorization/Challenge Methods ---
+
+// GetACMEAuthorization retrieves an authorization by ID.
+func (s *Store) GetACMEAuthorization(ctx context.Context, id string) (*ACMEAuthorization, error) {
+	var a ACMEAuthorization
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, order_id, identifier, status, expires, wildcard, created_at
+		 FROM acme_authorizations WHERE id = $1`, id).
+		Scan(&a.ID, &a.OrderID, &a.Identifier, &a.Status, &a.Expires, &a.Wildcard, &a.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetACMEAuthorization: %w", err)
+	}
+	return &a, nil
+}
+
+// ListACMEAuthorizationsByOrder returns authorizations for an order.
+func (s *Store) ListACMEAuthorizationsByOrder(ctx context.Context, orderID string) ([]*ACMEAuthorization, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, order_id, identifier, status, expires, wildcard, created_at
+		 FROM acme_authorizations WHERE order_id = $1`, orderID)
+	if err != nil {
+		return nil, fmt.Errorf("store.ListACMEAuthorizationsByOrder: %w", err)
+	}
+	defer rows.Close()
+
+	var authzs []*ACMEAuthorization
+	for rows.Next() {
+		var a ACMEAuthorization
+		if err := rows.Scan(&a.ID, &a.OrderID, &a.Identifier, &a.Status, &a.Expires, &a.Wildcard, &a.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store.ListACMEAuthorizationsByOrder: scan: %w", err)
+		}
+		authzs = append(authzs, &a)
+	}
+	return authzs, rows.Err()
+}
+
+// UpdateACMEAuthorizationStatus updates an authorization status.
+func (s *Store) UpdateACMEAuthorizationStatus(ctx context.Context, id, status string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE acme_authorizations SET status = $2 WHERE id = $1`, id, status)
+	if err != nil {
+		return fmt.Errorf("store.UpdateACMEAuthorizationStatus: %w", err)
+	}
+	return nil
+}
+
+// GetACMEChallenge retrieves a challenge by ID.
+func (s *Store) GetACMEChallenge(ctx context.Context, id string) (*ACMEChallenge, error) {
+	var ch ACMEChallenge
+	var validated sql.NullTime
+	var errType, errDetail sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, authz_id, type, status, token, validated, error_type, error_detail, created_at
+		 FROM acme_challenges WHERE id = $1`, id).
+		Scan(&ch.ID, &ch.AuthzID, &ch.Type, &ch.Status, &ch.Token, &validated, &errType, &errDetail, &ch.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetACMEChallenge: %w", err)
+	}
+	if validated.Valid {
+		ch.Validated = &validated.Time
+	}
+	ch.ErrorType = errType.String
+	ch.ErrorDetail = errDetail.String
+	return &ch, nil
+}
+
+// ListACMEChallengesByAuthz returns challenges for an authorization.
+func (s *Store) ListACMEChallengesByAuthz(ctx context.Context, authzID string) ([]*ACMEChallenge, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, authz_id, type, status, token, validated, error_type, error_detail, created_at
+		 FROM acme_challenges WHERE authz_id = $1`, authzID)
+	if err != nil {
+		return nil, fmt.Errorf("store.ListACMEChallengesByAuthz: %w", err)
+	}
+	defer rows.Close()
+
+	var challenges []*ACMEChallenge
+	for rows.Next() {
+		var ch ACMEChallenge
+		var validated sql.NullTime
+		var errType, errDetail sql.NullString
+		if err := rows.Scan(&ch.ID, &ch.AuthzID, &ch.Type, &ch.Status, &ch.Token, &validated, &errType, &errDetail, &ch.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store.ListACMEChallengesByAuthz: scan: %w", err)
+		}
+		if validated.Valid {
+			ch.Validated = &validated.Time
+		}
+		ch.ErrorType = errType.String
+		ch.ErrorDetail = errDetail.String
+		challenges = append(challenges, &ch)
+	}
+	return challenges, rows.Err()
+}
+
+// UpdateACMEChallengeStatus updates a challenge status.
+func (s *Store) UpdateACMEChallengeStatus(ctx context.Context, id, status string, validated *time.Time, errType, errDetail string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE acme_challenges SET status = $2, validated = $3, error_type = $4, error_detail = $5
+		 WHERE id = $1`, id, status, validated, errType, errDetail)
+	if err != nil {
+		return fmt.Errorf("store.UpdateACMEChallengeStatus: %w", err)
+	}
+	return nil
+}
+
+// GetACMEChallengeByToken retrieves a challenge by its token.
+func (s *Store) GetACMEChallengeByToken(ctx context.Context, token string) (*ACMEChallenge, error) {
+	var ch ACMEChallenge
+	var validated sql.NullTime
+	var errType, errDetail sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, authz_id, type, status, token, validated, error_type, error_detail, created_at
+		 FROM acme_challenges WHERE token = $1`, token).
+		Scan(&ch.ID, &ch.AuthzID, &ch.Type, &ch.Status, &ch.Token, &validated, &errType, &errDetail, &ch.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetACMEChallengeByToken: %w", err)
+	}
+	if validated.Valid {
+		ch.Validated = &validated.Time
+	}
+	ch.ErrorType = errType.String
+	ch.ErrorDetail = errDetail.String
+	return &ch, nil
 }

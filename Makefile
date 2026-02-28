@@ -48,7 +48,7 @@ generate-key: build
 
 # Conformance test
 conformance: build
-	./bin/mtc-conformance -url http://localhost:8080 -verbose
+	./bin/mtc-conformance -url http://localhost:8080 -acme-url http://localhost:8443 -verbose
 
 # Docker
 docker:

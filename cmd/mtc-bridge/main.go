@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/briantrzupek/ca-extension-merkle/internal/acme"
 	"github.com/briantrzupek/ca-extension-merkle/internal/admin"
 	"github.com/briantrzupek/ca-extension-merkle/internal/assertionissuer"
 	"github.com/briantrzupek/ca-extension-merkle/internal/cadb"
@@ -146,6 +147,49 @@ func main() {
 	if err != nil {
 		logger.Error("failed to create admin handler", "error", err)
 		os.Exit(1)
+	}
+
+	// Optionally start ACME server.
+	if cfg.ACME.Enabled {
+		acmeCfg := acme.Config{
+			ExternalURL:           cfg.ACME.ExternalURL,
+			CAProxyURL:            cfg.ACME.CAURL,
+			CAAPIKey:              cfg.ACME.CAAPIKey,
+			CAID:                  cfg.ACME.CAID,
+			TemplateID:            cfg.ACME.TemplateID,
+			MTCBridgeURL:          cfg.ACME.MTCBridgeURL,
+			OrderExpiry:           cfg.ACME.OrderExpiry,
+			AssertionTimeout:      cfg.ACME.AssertionTimeout,
+			AssertionPollInterval: cfg.ACME.AssertionPollInterval,
+			AutoApproveChallenge:  cfg.ACME.AutoApproveChallenge,
+		}
+		acmeSrv := acme.New(stateStore, acmeCfg, logger.With("component", "acme"))
+		acmeServer := &http.Server{
+			Addr:         cfg.ACME.Addr,
+			Handler:      acmeSrv,
+			ReadTimeout:  10 * time.Second,
+			WriteTimeout: 60 * time.Second,
+			IdleTimeout:  120 * time.Second,
+			BaseContext:  func(_ net.Listener) context.Context { return ctx },
+		}
+		go func() {
+			logger.Info("ACME server starting", "addr", cfg.ACME.Addr, "external_url", cfg.ACME.ExternalURL)
+			if err := acmeServer.ListenAndServe(); err != http.ErrServerClosed {
+				logger.Error("ACME server error", "error", err)
+			}
+		}()
+		// Shutdown ACME server on context cancel.
+		go func() {
+			<-ctx.Done()
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			acmeServer.Shutdown(shutdownCtx)
+		}()
+		logger.Info("ACME server configured",
+			"addr", cfg.ACME.Addr,
+			"auto_approve", cfg.ACME.AutoApproveChallenge,
+			"ca_url", cfg.ACME.CAURL,
+		)
 	}
 
 	// Build HTTP mux.
