@@ -108,6 +108,23 @@ var migrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_log_entries_serial ON log_entries(serial_hex)`,
 	`CREATE INDEX IF NOT EXISTS idx_checkpoints_tree_size ON checkpoints(tree_size)`,
 	`CREATE INDEX IF NOT EXISTS idx_log_entries_ca_cert_id ON log_entries(ca_cert_id)`,
+
+	// Phase 2: assertion bundles table for pre-computed assertion bundles.
+	`CREATE TABLE IF NOT EXISTS assertion_bundles (
+		entry_idx      BIGINT PRIMARY KEY REFERENCES log_entries(idx),
+		serial_hex     TEXT NOT NULL,
+		checkpoint_id  BIGINT NOT NULL REFERENCES checkpoints(id),
+		tree_size      BIGINT NOT NULL,
+		bundle_json    JSONB NOT NULL,
+		bundle_pem     TEXT NOT NULL,
+		stale          BOOLEAN NOT NULL DEFAULT FALSE,
+		created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		updated_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_assertion_bundles_serial ON assertion_bundles(serial_hex)`,
+	`CREATE INDEX IF NOT EXISTS idx_assertion_bundles_stale ON assertion_bundles(stale) WHERE stale = TRUE`,
+	`CREATE INDEX IF NOT EXISTS idx_assertion_bundles_checkpoint ON assertion_bundles(checkpoint_id)`,
+	`CREATE INDEX IF NOT EXISTS idx_assertion_bundles_created ON assertion_bundles(created_at DESC)`,
 }
 
 // --- Log Entries ---
@@ -629,6 +646,226 @@ func (s *Store) RevokedEntries(ctx context.Context, query string, limit int) ([]
 		results = append(results, &r)
 	}
 	return results, rows.Err()
+}
+
+// --- Assertion Bundles ---
+
+// AssertionBundle is a pre-computed assertion bundle stored in PostgreSQL.
+type AssertionBundle struct {
+	EntryIdx     int64           `json:"entry_idx"`
+	SerialHex    string          `json:"serial_hex"`
+	CheckpointID int64           `json:"checkpoint_id"`
+	TreeSize     int64           `json:"tree_size"`
+	BundleJSON   json.RawMessage `json:"bundle_json"`
+	BundlePEM    string          `json:"bundle_pem"`
+	Stale        bool            `json:"stale"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+}
+
+// UpsertAssertionBundle inserts or updates a pre-computed assertion bundle.
+func (s *Store) UpsertAssertionBundle(ctx context.Context, ab *AssertionBundle) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO assertion_bundles (entry_idx, serial_hex, checkpoint_id, tree_size, bundle_json, bundle_pem, stale)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT (entry_idx) DO UPDATE SET
+		   checkpoint_id = EXCLUDED.checkpoint_id,
+		   tree_size = EXCLUDED.tree_size,
+		   bundle_json = EXCLUDED.bundle_json,
+		   bundle_pem = EXCLUDED.bundle_pem,
+		   stale = EXCLUDED.stale,
+		   updated_at = NOW()`,
+		ab.EntryIdx, ab.SerialHex, ab.CheckpointID, ab.TreeSize, ab.BundleJSON, ab.BundlePEM, ab.Stale,
+	)
+	if err != nil {
+		return fmt.Errorf("store.UpsertAssertionBundle: %w", err)
+	}
+	return nil
+}
+
+// UpsertAssertionBundles inserts or updates multiple assertion bundles in a transaction.
+func (s *Store) UpsertAssertionBundles(ctx context.Context, bundles []*AssertionBundle) error {
+	if len(bundles) == 0 {
+		return nil
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store.UpsertAssertionBundles: begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.PrepareContext(ctx,
+		`INSERT INTO assertion_bundles (entry_idx, serial_hex, checkpoint_id, tree_size, bundle_json, bundle_pem, stale)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		 ON CONFLICT (entry_idx) DO UPDATE SET
+		   checkpoint_id = EXCLUDED.checkpoint_id,
+		   tree_size = EXCLUDED.tree_size,
+		   bundle_json = EXCLUDED.bundle_json,
+		   bundle_pem = EXCLUDED.bundle_pem,
+		   stale = EXCLUDED.stale,
+		   updated_at = NOW()`)
+	if err != nil {
+		return fmt.Errorf("store.UpsertAssertionBundles: prepare: %w", err)
+	}
+	defer stmt.Close()
+
+	for _, ab := range bundles {
+		if _, err := stmt.ExecContext(ctx, ab.EntryIdx, ab.SerialHex, ab.CheckpointID, ab.TreeSize, ab.BundleJSON, ab.BundlePEM, ab.Stale); err != nil {
+			return fmt.Errorf("store.UpsertAssertionBundles: idx=%d: %w", ab.EntryIdx, err)
+		}
+	}
+	return tx.Commit()
+}
+
+// GetAssertionBundle retrieves a pre-computed assertion bundle by entry index.
+func (s *Store) GetAssertionBundle(ctx context.Context, entryIdx int64) (*AssertionBundle, error) {
+	var ab AssertionBundle
+	err := s.db.QueryRowContext(ctx,
+		`SELECT entry_idx, serial_hex, checkpoint_id, tree_size, bundle_json, bundle_pem, stale, created_at, updated_at
+		 FROM assertion_bundles WHERE entry_idx = $1`, entryIdx).
+		Scan(&ab.EntryIdx, &ab.SerialHex, &ab.CheckpointID, &ab.TreeSize,
+			&ab.BundleJSON, &ab.BundlePEM, &ab.Stale, &ab.CreatedAt, &ab.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetAssertionBundle: %w", err)
+	}
+	return &ab, nil
+}
+
+// GetAssertionBundleBySerial retrieves a pre-computed assertion bundle by serial number.
+func (s *Store) GetAssertionBundleBySerial(ctx context.Context, serialHex string) (*AssertionBundle, error) {
+	var ab AssertionBundle
+	err := s.db.QueryRowContext(ctx,
+		`SELECT entry_idx, serial_hex, checkpoint_id, tree_size, bundle_json, bundle_pem, stale, created_at, updated_at
+		 FROM assertion_bundles WHERE serial_hex = $1`, serialHex).
+		Scan(&ab.EntryIdx, &ab.SerialHex, &ab.CheckpointID, &ab.TreeSize,
+			&ab.BundleJSON, &ab.BundlePEM, &ab.Stale, &ab.CreatedAt, &ab.UpdatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetAssertionBundleBySerial: %w", err)
+	}
+	return &ab, nil
+}
+
+// ListPendingEntries returns log entry indices that don't have a fresh assertion bundle.
+// It returns entries of type 1 (TBSCertificateLogEntry) that either have no bundle
+// or have a stale bundle.
+func (s *Store) ListPendingEntries(ctx context.Context, limit int) ([]int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT le.idx FROM log_entries le
+		 LEFT JOIN assertion_bundles ab ON le.idx = ab.entry_idx AND ab.stale = FALSE
+		 WHERE le.entry_type = 1 AND ab.entry_idx IS NULL
+		 ORDER BY le.idx DESC
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store.ListPendingEntries: %w", err)
+	}
+	defer rows.Close()
+
+	var indices []int64
+	for rows.Next() {
+		var idx int64
+		if err := rows.Scan(&idx); err != nil {
+			return nil, fmt.Errorf("store.ListPendingEntries: scan: %w", err)
+		}
+		indices = append(indices, idx)
+	}
+	return indices, rows.Err()
+}
+
+// MarkStaleBundles marks all assertion bundles with tree_size < currentTreeSize as stale.
+func (s *Store) MarkStaleBundles(ctx context.Context, currentTreeSize int64) (int64, error) {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE assertion_bundles SET stale = TRUE, updated_at = NOW()
+		 WHERE tree_size < $1 AND stale = FALSE`, currentTreeSize)
+	if err != nil {
+		return 0, fmt.Errorf("store.MarkStaleBundles: %w", err)
+	}
+	return result.RowsAffected()
+}
+
+// ListStaleBundles returns entry indices with stale assertion bundles.
+func (s *Store) ListStaleBundles(ctx context.Context, limit int) ([]int64, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT entry_idx FROM assertion_bundles
+		 WHERE stale = TRUE
+		 ORDER BY entry_idx DESC
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store.ListStaleBundles: %w", err)
+	}
+	defer rows.Close()
+
+	var indices []int64
+	for rows.Next() {
+		var idx int64
+		if err := rows.Scan(&idx); err != nil {
+			return nil, fmt.Errorf("store.ListStaleBundles: scan: %w", err)
+		}
+		indices = append(indices, idx)
+	}
+	return indices, rows.Err()
+}
+
+// GetFreshBundlesSince returns assertion bundles created/updated since the given checkpoint ID.
+func (s *Store) GetFreshBundlesSince(ctx context.Context, sinceCheckpointID int64, limit int) ([]*AssertionBundle, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT entry_idx, serial_hex, checkpoint_id, tree_size, bundle_json, bundle_pem, stale, created_at, updated_at
+		 FROM assertion_bundles
+		 WHERE checkpoint_id > $1 AND stale = FALSE
+		 ORDER BY created_at DESC
+		 LIMIT $2`, sinceCheckpointID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetFreshBundlesSince: %w", err)
+	}
+	defer rows.Close()
+
+	var bundles []*AssertionBundle
+	for rows.Next() {
+		var ab AssertionBundle
+		if err := rows.Scan(&ab.EntryIdx, &ab.SerialHex, &ab.CheckpointID, &ab.TreeSize,
+			&ab.BundleJSON, &ab.BundlePEM, &ab.Stale, &ab.CreatedAt, &ab.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("store.GetFreshBundlesSince: scan: %w", err)
+		}
+		bundles = append(bundles, &ab)
+	}
+	return bundles, rows.Err()
+}
+
+// AssertionStats holds aggregate statistics for assertion bundles.
+type AssertionStats struct {
+	TotalBundles   int64     `json:"total_bundles"`
+	FreshBundles   int64     `json:"fresh_bundles"`
+	StaleBundles   int64     `json:"stale_bundles"`
+	PendingEntries int64     `json:"pending_entries"`
+	LastGenerated  time.Time `json:"last_generated"`
+}
+
+// GetAssertionStats returns aggregate statistics for assertion bundles.
+func (s *Store) GetAssertionStats(ctx context.Context) (*AssertionStats, error) {
+	var stats AssertionStats
+	err := s.db.QueryRowContext(ctx,
+		`SELECT
+			COALESCE((SELECT COUNT(*) FROM assertion_bundles), 0),
+			COALESCE((SELECT COUNT(*) FROM assertion_bundles WHERE stale = FALSE), 0),
+			COALESCE((SELECT COUNT(*) FROM assertion_bundles WHERE stale = TRUE), 0),
+			COALESCE((SELECT COUNT(*) FROM log_entries le
+			          LEFT JOIN assertion_bundles ab ON le.idx = ab.entry_idx AND ab.stale = FALSE
+			          WHERE le.entry_type = 1 AND ab.entry_idx IS NULL), 0),
+			COALESCE((SELECT MAX(updated_at) FROM assertion_bundles), '1970-01-01')
+		`).Scan(&stats.TotalBundles, &stats.FreshBundles, &stats.StaleBundles,
+		&stats.PendingEntries, &stats.LastGenerated)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetAssertionStats: %w", err)
+	}
+	return &stats, nil
 }
 
 // --- Watcher Cursor ---

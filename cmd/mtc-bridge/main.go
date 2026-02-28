@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/briantrzupek/ca-extension-merkle/internal/admin"
+	"github.com/briantrzupek/ca-extension-merkle/internal/assertionissuer"
 	"github.com/briantrzupek/ca-extension-merkle/internal/cadb"
 	"github.com/briantrzupek/ca-extension-merkle/internal/config"
 	"github.com/briantrzupek/ca-extension-merkle/internal/cosigner"
@@ -116,9 +117,32 @@ func main() {
 	}
 	w := watcher.New(caAdapter, stateStore, ilog, revMgr, watcherCfg, logger.With("component", "watcher"))
 
+	// Create assertion issuer and hook into watcher.
+	issuerCfg := assertionissuer.Config{
+		Enabled:            cfg.AssertionIssuer.IsEnabled(),
+		BatchSize:          cfg.AssertionIssuer.BatchSize,
+		Concurrency:        cfg.AssertionIssuer.Concurrency,
+		StalenessThreshold: cfg.AssertionIssuer.StalenessThreshold,
+	}
+	for _, wh := range cfg.AssertionIssuer.Webhooks {
+		issuerCfg.Webhooks = append(issuerCfg.Webhooks, assertionissuer.WebhookConfig{
+			URL:     wh.URL,
+			Pattern: wh.Pattern,
+			Secret:  wh.Secret,
+		})
+	}
+	issuer := assertionissuer.New(stateStore, cfg.Log.Origin, issuerCfg, logger.With("component", "assertionissuer"))
+	w.OnCheckpoint(issuer.RunOnCheckpoint)
+	logger.Info("assertion issuer configured",
+		"enabled", issuerCfg.Enabled,
+		"batch_size", issuerCfg.BatchSize,
+		"concurrency", issuerCfg.Concurrency,
+		"webhooks", len(issuerCfg.Webhooks),
+	)
+
 	// Create HTTP handlers.
 	tlogHandler := tlogtiles.New(stateStore, revMgr, cfg.Log.Origin, logger.With("component", "tlogtiles"))
-	adminHandler, err := admin.New(stateStore, w, cfg.Log.Origin, logger.With("component", "admin"))
+	adminHandler, err := admin.New(stateStore, w, issuer, cfg.Log.Origin, logger.With("component", "admin"))
 	if err != nil {
 		logger.Error("failed to create admin handler", "error", err)
 		os.Exit(1)
@@ -131,6 +155,7 @@ func main() {
 	mux.Handle("/revocation", tlogHandler)
 	mux.Handle("/proof/", tlogHandler)
 	mux.Handle("/assertion/", tlogHandler)
+	mux.Handle("/assertions/", tlogHandler)
 	mux.Handle("/admin", adminHandler)
 	mux.Handle("/admin/", adminHandler)
 

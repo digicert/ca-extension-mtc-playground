@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/briantrzupek/ca-extension-merkle/internal/assertion"
+	"github.com/briantrzupek/ca-extension-merkle/internal/assertionissuer"
 	"github.com/briantrzupek/ca-extension-merkle/internal/certutil"
 	"github.com/briantrzupek/ca-extension-merkle/internal/store"
 	"github.com/briantrzupek/ca-extension-merkle/internal/watcher"
@@ -25,6 +26,7 @@ import (
 type Handler struct {
 	store     *store.Store
 	watcher   *watcher.Watcher
+	issuer    *assertionissuer.Issuer
 	assertBld *assertion.Builder
 	logger    *slog.Logger
 	tmpl      *template.Template
@@ -32,7 +34,7 @@ type Handler struct {
 }
 
 // New creates a new admin Handler.
-func New(s *store.Store, w *watcher.Watcher, logOrigin string, logger *slog.Logger) (*Handler, error) {
+func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOrigin string, logger *slog.Logger) (*Handler, error) {
 	funcMap := template.FuncMap{
 		"formatTime": func(t time.Time) string {
 			if t.IsZero() {
@@ -64,6 +66,7 @@ func New(s *store.Store, w *watcher.Watcher, logOrigin string, logger *slog.Logg
 	h := &Handler{
 		store:     s,
 		watcher:   w,
+		issuer:    iss,
 		assertBld: assertion.NewBuilder(s, logOrigin),
 		logger:    logger,
 		tmpl:      tmpl,
@@ -110,11 +113,20 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	watcherStats := h.watcher.GetStats()
 
+	assertionStats, err := h.store.GetAssertionStats(r.Context())
+	if err != nil {
+		h.logger.Error("admin: get assertion stats", "error", err)
+		assertionStats = &store.AssertionStats{}
+	}
+	issuerStats := h.issuer.GetStats()
+
 	data := map[string]interface{}{
-		"Stats":        stats,
-		"Events":       events,
-		"Checkpoints":  checkpoints,
-		"WatcherStats": watcherStats,
+		"Stats":          stats,
+		"Events":         events,
+		"Checkpoints":    checkpoints,
+		"WatcherStats":   watcherStats,
+		"AssertionStats": assertionStats,
+		"IssuerStats":    issuerStats,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -131,6 +143,12 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 	}
 	watcherStats := h.watcher.GetStats()
 
+	assertionStats, _ := h.store.GetAssertionStats(r.Context())
+	if assertionStats == nil {
+		assertionStats = &store.AssertionStats{}
+	}
+	issuerStats := h.issuer.GetStats()
+
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 
 	watcherStatusClass := "text-red-600"
@@ -145,6 +163,16 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		latestCheckpoint = stats.LatestCheckpoint.Format("2006-01-02 15:04:05 UTC")
 	}
 
+	lastGenerated := "never"
+	if !assertionStats.LastGenerated.IsZero() && assertionStats.LastGenerated.Year() > 1970 {
+		lastGenerated = assertionStats.LastGenerated.Format("2006-01-02 15:04:05 UTC")
+	}
+
+	lastRun := "never"
+	if !issuerStats.LastRunTime.IsZero() {
+		lastRun = issuerStats.LastRunDuration
+	}
+
 	fmt.Fprintf(w, `<h2 class="text-lg font-semibold mb-4">Log Statistics</h2>
 		<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-6">
 			<div><p class="text-gray-500 text-sm">Tree Size</p><p class="text-2xl font-bold">%d</p></div>
@@ -153,6 +181,15 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 			<div><p class="text-gray-500 text-sm">Watcher</p><p class="text-2xl font-bold"><span class="%s">%s</span></p></div>
 			<div><p class="text-gray-500 text-sm">Certs Processed</p><p class="text-2xl font-bold">%d</p></div>
 			<div><p class="text-gray-500 text-sm">Latest Checkpoint</p><p class="text-sm font-medium mt-1">%s</p></div>
+		</div>
+		<h2 class="text-lg font-semibold mb-4 mt-6">Assertion Issuer</h2>
+		<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-6">
+			<div><p class="text-gray-500 text-sm">Total Bundles</p><p class="text-2xl font-bold">%d</p></div>
+			<div><p class="text-gray-500 text-sm">Fresh</p><p class="text-2xl font-bold text-green-600">%d</p></div>
+			<div><p class="text-gray-500 text-sm">Stale</p><p class="text-2xl font-bold text-amber-600">%d</p></div>
+			<div><p class="text-gray-500 text-sm">Pending</p><p class="text-2xl font-bold text-blue-600">%d</p></div>
+			<div><p class="text-gray-500 text-sm">Last Generated</p><p class="text-sm font-medium mt-1">%s</p></div>
+			<div><p class="text-gray-500 text-sm">Last Run</p><p class="text-sm font-medium mt-1">%s</p></div>
 		</div>`,
 		stats.TreeSize,
 		stats.RevocationCount,
@@ -160,6 +197,12 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		watcherStatusClass, watcherStatusText,
 		watcherStats.CertsProcessed,
 		latestCheckpoint,
+		assertionStats.TotalBundles,
+		assertionStats.FreshBundles,
+		assertionStats.StaleBundles,
+		assertionStats.PendingEntries,
+		lastGenerated,
+		lastRun,
 	)
 }
 

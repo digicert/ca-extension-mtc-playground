@@ -18,20 +18,26 @@ import (
 
 // Config holds watcher configuration.
 type Config struct {
-	PollInterval        time.Duration
-	CheckpointInterval  time.Duration
-	BatchSize           int
+	PollInterval           time.Duration
+	CheckpointInterval     time.Duration
+	BatchSize              int
 	RevocationPollInterval time.Duration
 }
 
+// CheckpointCallback is called after a new checkpoint is created.
+// It receives the checkpoint ID and tree size.
+type CheckpointCallback func(ctx context.Context, checkpointID int64, treeSize int64)
+
 // Watcher polls the CA database and manages the issuance log.
 type Watcher struct {
-	cadb    *cadb.Adapter
-	store   *store.Store
-	log     *issuancelog.Log
-	revMgr  *revocation.Manager
-	cfg     Config
-	logger  *slog.Logger
+	cadb   *cadb.Adapter
+	store  *store.Store
+	log    *issuancelog.Log
+	revMgr *revocation.Manager
+	cfg    Config
+	logger *slog.Logger
+
+	onCheckpoint CheckpointCallback
 
 	mu              sync.Mutex
 	running         bool
@@ -57,6 +63,11 @@ func New(
 		cfg:    cfg,
 		logger: logger,
 	}
+}
+
+// OnCheckpoint registers a callback to execute after each checkpoint.
+func (w *Watcher) OnCheckpoint(fn CheckpointCallback) {
+	w.onCheckpoint = fn
 }
 
 // Run starts the watcher loop. It blocks until ctx is cancelled.
@@ -218,6 +229,11 @@ func (w *Watcher) createCheckpoint(ctx context.Context) error {
 	w.mu.Lock()
 	w.lastCheckpoint = cp.Timestamp
 	w.mu.Unlock()
+
+	// Trigger assertion generation callback if registered.
+	if w.onCheckpoint != nil {
+		go w.onCheckpoint(ctx, cp.ID, cp.TreeSize)
+	}
 
 	return nil
 }

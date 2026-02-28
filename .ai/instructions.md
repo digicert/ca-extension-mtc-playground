@@ -61,6 +61,7 @@ This is an **experimental/internal** implementation — simplified scope (no ext
 | `internal/admin` | Admin dashboard + certificate browser: Go templates + HTMX, SSE for live events |
 | `internal/assertion` | Assertion bundle builder + JSON/PEM formatter + proof verifier |
 | `internal/certutil` | X.509 DER parser for certificate metadata extraction (stdlib only) |
+| `internal/assertionissuer` | Background assertion generation pipeline: batch build, freshness tracking, webhooks |
 
 ## Critical Invariants
 
@@ -129,4 +130,7 @@ Four tiers + conformance client:
 
 ## Phase Guides
 
+- [Build Plan: 4-Phase Roadmap](build-plan.md)
+- [Phase 1: Assertion Bundle API](phase1-assertion-bundles.md)
+- [Phase 2: MTC Assertion Issuer](phase2-assertion-issuer.md)
 - [Phase 1: Assertion Bundle API & Certificate Browser](phase1-assertion-bundles.md)

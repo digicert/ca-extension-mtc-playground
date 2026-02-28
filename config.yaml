@@ -44,3 +44,13 @@ cosigner:
 logging:
   level: "info"
   format: "json"
+
+assertion_issuer:
+  # enabled: true  # default; set false to disable
+  batch_size: 100
+  concurrency: 4
+  staleness_threshold: 5
+  # webhooks:
+  #   - url: "https://example.com/mtc-webhook"
+  #     pattern: "*.example.com"
+  #     secret: "webhook-secret"

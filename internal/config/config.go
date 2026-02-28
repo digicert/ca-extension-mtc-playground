@@ -36,6 +36,48 @@ type Config struct {
 
 	// Logging configures structured logging.
 	Logging LoggingConfig `yaml:"logging"`
+
+	// AssertionIssuer configures the background assertion generation pipeline.
+	AssertionIssuer AssertionIssuerConfig `yaml:"assertion_issuer"`
+}
+
+// AssertionIssuerConfig configures the background assertion generation pipeline.
+type AssertionIssuerConfig struct {
+	// Enabled turns the assertion issuer on/off (default: true).
+	Enabled *bool `yaml:"enabled"`
+
+	// BatchSize is entries per generation batch (default: 100).
+	BatchSize int `yaml:"batch_size"`
+
+	// Concurrency is the number of parallel bundle builders (default: 4).
+	Concurrency int `yaml:"concurrency"`
+
+	// StalenessThreshold regenerates if proof is >N checkpoints old (default: 5).
+	StalenessThreshold int `yaml:"staleness_threshold"`
+
+	// Webhooks is a list of webhook targets to notify after assertion generation.
+	Webhooks []WebhookConfig `yaml:"webhooks"`
+}
+
+// IsEnabled returns whether the assertion issuer is enabled.
+// Defaults to true if not explicitly set.
+func (c AssertionIssuerConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return true
+	}
+	return *c.Enabled
+}
+
+// WebhookConfig configures a single webhook notification target.
+type WebhookConfig struct {
+	// URL is the webhook endpoint to POST to.
+	URL string `yaml:"url"`
+
+	// Pattern is a CN/SAN glob pattern to filter which assertions trigger this webhook.
+	Pattern string `yaml:"pattern"`
+
+	// Secret is an HMAC-SHA256 secret for the X-MTC-Signature header.
+	Secret string `yaml:"secret"`
 }
 
 // LogConfig configures the issuance log identity.
@@ -266,6 +308,17 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Logging.Format == "" {
 		cfg.Logging.Format = "json"
+	}
+
+	// Assertion issuer defaults.
+	if cfg.AssertionIssuer.BatchSize <= 0 {
+		cfg.AssertionIssuer.BatchSize = 100
+	}
+	if cfg.AssertionIssuer.Concurrency <= 0 {
+		cfg.AssertionIssuer.Concurrency = 4
+	}
+	if cfg.AssertionIssuer.StalenessThreshold <= 0 {
+		cfg.AssertionIssuer.StalenessThreshold = 5
 	}
 }
 

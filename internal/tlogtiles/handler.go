@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/briantrzupek/ca-extension-merkle/internal/assertion"
 	"github.com/briantrzupek/ca-extension-merkle/internal/merkle"
@@ -54,6 +55,8 @@ func New(s *store.Store, revMgr *revocation.Manager, logOrigin string, logger *s
 	h.mux.HandleFunc("GET /proof/inclusion", h.handleInclusionProof)
 	h.mux.HandleFunc("GET /assertion/{query}", h.handleAssertion)
 	h.mux.HandleFunc("GET /assertion/{query}/pem", h.handleAssertionPEM)
+	h.mux.HandleFunc("GET /assertions/pending", h.handleAssertionsPending)
+	h.mux.HandleFunc("GET /assertions/stats", h.handleAssertionsStats)
 	return h
 }
 
@@ -396,6 +399,80 @@ func (h *Handler) handleAssertionPEM(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Write(data)
+}
+
+// handleAssertionsPending returns pre-computed assertion bundles generated since a given checkpoint.
+// Query params: since=<checkpoint_id>, limit=<n> (default 100, max 500).
+func (h *Handler) handleAssertionsPending(w http.ResponseWriter, r *http.Request) {
+	sinceStr := r.URL.Query().Get("since")
+	if sinceStr == "" {
+		sinceStr = "0"
+	}
+	sinceID, err := strconv.ParseInt(sinceStr, 10, 64)
+	if err != nil || sinceID < 0 {
+		http.Error(w, "invalid 'since' parameter", http.StatusBadRequest)
+		return
+	}
+
+	limit := 100
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if n, err := strconv.Atoi(limitStr); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	bundles, err := h.store.GetFreshBundlesSince(r.Context(), sinceID, limit)
+	if err != nil {
+		h.logger.Error("assertions pending", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	type pendingEntry struct {
+		EntryIdx     int64  `json:"entry_idx"`
+		SerialHex    string `json:"serial_hex"`
+		CheckpointID int64  `json:"checkpoint_id"`
+		AssertionURL string `json:"assertion_url"`
+		CreatedAt    string `json:"created_at"`
+	}
+
+	entries := make([]pendingEntry, 0, len(bundles))
+	for _, ab := range bundles {
+		entries = append(entries, pendingEntry{
+			EntryIdx:     ab.EntryIdx,
+			SerialHex:    ab.SerialHex,
+			CheckpointID: ab.CheckpointID,
+			AssertionURL: fmt.Sprintf("/assertion/%s", ab.SerialHex),
+			CreatedAt:    ab.CreatedAt.Format(time.RFC3339),
+		})
+	}
+
+	resp := map[string]interface{}{
+		"since":   sinceID,
+		"count":   len(entries),
+		"entries": entries,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handleAssertionsStats returns aggregate assertion statistics as JSON.
+func (h *Handler) handleAssertionsStats(w http.ResponseWriter, r *http.Request) {
+	stats, err := h.store.GetAssertionStats(r.Context())
+	if err != nil {
+		h.logger.Error("assertion stats", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	json.NewEncoder(w).Encode(stats)
 }
 
 // decodeTileIndex decodes a C2SP tile index path.

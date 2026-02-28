@@ -56,6 +56,33 @@ const dashboardHTML = `<!DOCTYPE html>
 					<p class="text-sm font-medium mt-1">{{ formatTime .Stats.LatestCheckpoint }}</p>
 				</div>
 			</div>
+			<h2 class="text-lg font-semibold mb-4 mt-6">Assertion Issuer</h2>
+			<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-6">
+				<div>
+					<p class="text-gray-500 text-sm">Total Bundles</p>
+					<p class="text-2xl font-bold">{{ .AssertionStats.TotalBundles }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Fresh</p>
+					<p class="text-2xl font-bold text-green-600">{{ .AssertionStats.FreshBundles }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Stale</p>
+					<p class="text-2xl font-bold text-amber-600">{{ .AssertionStats.StaleBundles }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Pending</p>
+					<p class="text-2xl font-bold text-blue-600">{{ .AssertionStats.PendingEntries }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Last Generated</p>
+					<p class="text-sm font-medium mt-1">{{ formatTime .AssertionStats.LastGenerated }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Last Run</p>
+					<p class="text-sm font-medium mt-1">{{ .IssuerStats.LastRunDuration }}</p>
+				</div>
+			</div>
 		</section>
 
 		<div class="grid md:grid-cols-2 gap-8">

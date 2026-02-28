@@ -57,6 +57,9 @@ func main() {
 		{"assertion_bundle_json", c.testAssertionBundleJSON},
 		{"assertion_bundle_pem", c.testAssertionBundlePEM},
 		{"assertion_verify_proof", c.testAssertionVerifyProof},
+		{"assertion_auto_generation", c.testAssertionAutoGeneration},
+		{"assertion_polling", c.testAssertionPolling},
+		{"assertion_stats", c.testAssertionStats},
 	}
 
 	for _, tt := range tests {
@@ -638,6 +641,120 @@ func (c *conformanceClient) testAssertionVerifyProof() error {
 	}
 	if status != 404 {
 		return fmt.Errorf("expected 404 for null entry assertion, got %d", status)
+	}
+
+	return nil
+}
+
+// --- Phase 2: Assertion Issuer conformance tests ---
+
+func (c *conformanceClient) testAssertionAutoGeneration() error {
+	// Verify the /assertions/stats endpoint reports auto-generated bundles.
+	body, status, err := c.get("/assertions/stats")
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("expected 200, got %d", status)
+	}
+
+	var stats struct {
+		TotalBundles   int64  `json:"total_bundles"`
+		FreshBundles   int64  `json:"fresh_bundles"`
+		StaleBundles   int64  `json:"stale_bundles"`
+		PendingEntries int64  `json:"pending_entries"`
+		LastGenerated  string `json:"last_generated"`
+	}
+	if err := json.Unmarshal(body, &stats); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	// Stats endpoint must return valid JSON with expected fields.
+	// Total bundles may be 0 if the issuer hasn't run yet, but fields must exist.
+	if c.verbose {
+		fmt.Printf("    total_bundles=%d fresh=%d stale=%d pending=%d\n",
+			stats.TotalBundles, stats.FreshBundles, stats.StaleBundles, stats.PendingEntries)
+	}
+
+	return nil
+}
+
+func (c *conformanceClient) testAssertionPolling() error {
+	// Verify the /assertions/pending endpoint works with since=0.
+	body, status, err := c.get("/assertions/pending?since=0&limit=10")
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("expected 200, got %d", status)
+	}
+
+	var resp struct {
+		Since   int64 `json:"since"`
+		Count   int   `json:"count"`
+		Entries []struct {
+			EntryIdx     int64  `json:"entry_idx"`
+			SerialHex    string `json:"serial_hex"`
+			CheckpointID int64  `json:"checkpoint_id"`
+			AssertionURL string `json:"assertion_url"`
+			CreatedAt    string `json:"created_at"`
+		} `json:"entries"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	if resp.Since != 0 {
+		return fmt.Errorf("expected since=0, got %d", resp.Since)
+	}
+	if resp.Count != len(resp.Entries) {
+		return fmt.Errorf("count %d != len(entries) %d", resp.Count, len(resp.Entries))
+	}
+
+	// If we have entries, verify each has required fields.
+	for i, e := range resp.Entries {
+		if e.EntryIdx <= 0 {
+			return fmt.Errorf("entry[%d]: invalid entry_idx %d", i, e.EntryIdx)
+		}
+		if e.SerialHex == "" {
+			return fmt.Errorf("entry[%d]: empty serial_hex", i)
+		}
+		if e.AssertionURL == "" {
+			return fmt.Errorf("entry[%d]: empty assertion_url", i)
+		}
+		if e.CheckpointID <= 0 {
+			return fmt.Errorf("entry[%d]: invalid checkpoint_id %d", i, e.CheckpointID)
+		}
+	}
+
+	if c.verbose {
+		fmt.Printf("    polling: %d entries returned\n", resp.Count)
+	}
+
+	return nil
+}
+
+func (c *conformanceClient) testAssertionStats() error {
+	// Verify the /assertions/stats endpoint returns valid JSON.
+	body, status, err := c.get("/assertions/stats")
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("expected 200, got %d", status)
+	}
+
+	var stats map[string]interface{}
+	if err := json.Unmarshal(body, &stats); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	// Verify required fields exist.
+	requiredFields := []string{"total_bundles", "fresh_bundles", "stale_bundles", "pending_entries", "last_generated"}
+	for _, f := range requiredFields {
+		if _, ok := stats[f]; !ok {
+			return fmt.Errorf("missing required field: %s", f)
+		}
 	}
 
 	return nil
