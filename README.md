@@ -160,6 +160,56 @@ The ACME server starts on `http://localhost:8443` (configurable via `acme.addr`)
 
 ---
 
+## Demonstrating ACME Functionality (Phase 3)
+
+### Architectural & Design Decisions
+
+- **Standalone ACME server** (RFC 8555) runs on a separate port (`:8443`) alongside the main service.
+- **JWS verification** uses only Go stdlib (ES256/RS256), no external JOSE libraries.
+- **Account management** via JWK thumbprint (RFC 7638).
+- **Order lifecycle**: pending → ready → processing → valid, with http-01 challenge validation (auto-approve for internal CAs).
+- **CA proxy**: Finalize requests are proxied to DigiCert CA REST API; assertion bundles are polled and attached to certificate downloads.
+- **In-memory nonce store** with TTL cleanup.
+- **Database**: 4 new ACME tables, 6 indexes, ~16 CRUD methods.
+- **Config**: `ACMEConfig` with 12 fields, sensible defaults.
+- **Conformance**: 5 new ACME tests, 22 total, all passing.
+
+### How to Demonstrate
+
+1. **Start the Service**
+  ```bash
+  make build
+  ./bin/mtc-bridge -config config.yaml
+  ```
+  - Main API: `http://localhost:8080`
+  - ACME API: `http://localhost:8443`
+
+2. **Check ACME Directory**
+  ```bash
+  curl -s http://localhost:8443/acme/directory | python3 -m json.tool
+  ```
+
+3. **Get a Replay-Nonce**
+  ```bash
+  curl -sI http://localhost:8443/acme/new-nonce | grep -i replay-nonce
+  ```
+
+4. **Run ACME Conformance Tests**
+  ```bash
+  ./bin/mtc-conformance -url http://localhost:8080 -acme-url http://localhost:8443 -verbose
+  ```
+  - All 22 tests should pass, including 5 ACME tests.
+
+5. **Full ACME Order Flow**
+  - Create account (JWS POST to `/acme/new-account`)
+  - Create order (JWS POST to `/acme/new-order`)
+  - Get authorization and challenge
+  - Trigger challenge validation (auto-approved in dev mode)
+  - Finalize order (proxy CSR to DigiCert CA)
+  - Download certificate + assertion bundle (PEM)
+  - See `.ai/phase3-acme-server.md` for full technical details and API examples.
+
+
 ## Hands-On Walkthrough
 
 This section provides step-by-step commands you can run to issue a certificate
