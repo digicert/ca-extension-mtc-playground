@@ -28,6 +28,10 @@ focused on transparency and auditability.
 | Revocation tracking | MTC §5.7 | Revocation-by-index bitfield, polled from CA database |
 | Single local cosigner | MTC §5.5 | Ed25519 key pair, signs checkpoints on each tree update |
 | Null entry at index 0 | MTC §5.3 | Sentinel entry per spec |
+| Assertion bundles | Phase 1 | Self-contained proof artifacts (JSON + PEM) with cert metadata |
+| X.509 metadata extraction | Phase 1 | Parses DER certificates for display in bundles and UI |
+| Certificate browser | Phase 1 | Admin UI for searching/browsing certs with status badges |
+| `mtc-assertion` CLI | Phase 1 | Standalone tool to fetch, verify, and inspect assertion bundles |
 
 ### Not Implemented
 
@@ -67,6 +71,7 @@ focused on transparency and auditability.
                             │  │ tlogtiles   │  │──► HTTP :8080
                             │  │ admin UI    │  │    /checkpoint, /tile/...
                             │  │ proofs      │  │    /proof/inclusion
+                            │  │ assertions  │  │    /assertion/{query}
                             │  └─────────────┘  │
                             └──────────────────┘
 ```
@@ -291,7 +296,95 @@ open http://localhost:8080/admin/
 
 The admin dashboard will show the updated revocation count.
 
-### Step 8 — Run the Full Conformance Suite
+### Step 8 — Fetch an Assertion Bundle
+
+Assertion bundles are self-contained proof artifacts that package a
+certificate with its Merkle inclusion proof, signed checkpoint, and
+parsed X.509 metadata.
+
+```bash
+# Fetch the assertion bundle by serial number (JSON)
+curl -s "$MTC_URL/assertion/$SERIAL" | python3 -m json.tool
+```
+
+Example output:
+
+```json
+{
+  "leaf_index": 7968,
+  "serial_hex": "5BF2A7443A479D5600C6220D369208E325F31C62",
+  "cert_meta": {
+    "common_name": "mtc-demo.example.com",
+    "organization": ["MTC Demo Corp"],
+    "sans": ["mtc-demo.example.com"],
+    "key_algorithm": "RSA",
+    "is_ca": false
+  },
+  "leaf_hash": "5b9a1e9e9f15e4ab...",
+  "proof": ["305170f5b9beb10f...", "08f1f04d5d8c81a1..."],
+  "tree_size": 7969,
+  "root_hash": "c838a8b9d03f79f8...",
+  "checkpoint": "localhost/mtc-bridge\n7969\n...",
+  "revoked": false,
+  "log_origin": "localhost/mtc-bridge"
+}
+```
+
+The bundle includes everything needed to independently verify the
+certificate's presence in the log — the leaf hash, inclusion proof,
+tree size, root hash, and signed checkpoint.
+
+```bash
+# Also available in PEM-like text format
+curl -s "$MTC_URL/assertion/$SERIAL/pem"
+```
+
+### Step 9 — Use the mtc-assertion CLI
+
+The `mtc-assertion` CLI tool provides fetch, verify, and inspect
+subcommands for working with assertion bundles offline.
+
+```bash
+# Fetch a bundle by serial number and save to file
+./bin/mtc-assertion fetch -serial $SERIAL -output /tmp/bundle.json
+
+# Verify the inclusion proof cryptographically
+./bin/mtc-assertion verify -input /tmp/bundle.json
+# Output: "Inclusion proof is VALID"
+
+# Pretty-print all bundle details
+./bin/mtc-assertion inspect -input /tmp/bundle.json
+```
+
+`verify` walks the Merkle inclusion proof from the leaf hash up to the
+root, using RFC 9162 hash combining (`SHA-256(0x01 ∥ left ∥ right)`).
+If the computed root matches the checkpoint's root hash, the proof is
+valid.
+
+```bash
+# You can also fetch by tree index
+./bin/mtc-assertion fetch -index 1 -output /tmp/bundle1.json
+./bin/mtc-assertion inspect -input /tmp/bundle1.json
+
+# Or fetch in PEM format
+./bin/mtc-assertion fetch -serial $SERIAL -format pem
+```
+
+### Step 10 — Browse Certificates in the Admin UI
+
+The admin dashboard includes a certificate browser with search:
+
+```bash
+open http://localhost:8080/admin/certs
+```
+
+Features:
+- **Search** by serial number or cert ID
+- **Status badges** showing Active (green) or Revoked (red)
+- **Detail pages** with parsed X.509 metadata, inclusion proof, and
+  download links for JSON/PEM assertion bundles
+
+### Step 11 — Run the Full Conformance Suite
 
 ```bash
 make conformance
@@ -314,8 +407,11 @@ Target: http://localhost:8080
   proof_api_inclusion            [PASS]
   tile_caching                   [PASS]
   revocation_endpoint            [PASS]
+  assertion_bundle_json          [PASS]
+  assertion_bundle_pem           [PASS]
+  assertion_verify_proof         [PASS]
 
-Results: 11 passed, 0 failed, 0 skipped
+Results: 14 passed, 0 failed, 0 skipped
 ```
 
 ---
@@ -328,8 +424,12 @@ Results: 11 passed, 0 failed, 0 skipped
 | GET | `/tile/<L>/<N>` | Merkle hash tile at level L, index N |
 | GET | `/tile/entries/<N>` | Entry bundle tile at index N |
 | GET | `/proof/inclusion?serial=<hex>[&index=<n>]` | Inclusion proof for a certificate by serial number |
+| GET | `/assertion/{query}` | Assertion bundle as JSON (query by index or serial hex) |
+| GET | `/assertion/{query}/pem` | Assertion bundle in PEM-like text format |
 | GET | `/revocation` | Revocation bitfield (binary) |
 | GET | `/admin/` | HTMX admin dashboard |
+| GET | `/admin/certs` | Certificate browser with search |
+| GET | `/admin/certs/{index}` | Certificate detail page with assertion bundle |
 | GET | `/healthz` | Health check |
 
 ### Checkpoint Format
@@ -355,6 +455,38 @@ Results: 11 passed, 0 failed, 0 skipped
 }
 ```
 
+### Assertion Bundle Response (`/assertion/{query}`)
+
+```json
+{
+  "leaf_index": 42,
+  "serial_hex": "5BF2A7443A479D5600C6220D369208E325F31C62",
+  "cert_der": "<base64 DER>",
+  "cert_meta": {
+    "common_name": "example.com",
+    "organization": ["My Org"],
+    "sans": ["example.com"],
+    "serial_number": "5BF2A7...",
+    "not_before": "2026-01-01T00:00:00Z",
+    "not_after": "2027-01-01T00:00:00Z",
+    "key_algorithm": "RSA",
+    "signature_algorithm": "SHA256-RSA",
+    "is_ca": false
+  },
+  "leaf_hash": "<hex SHA-256>",
+  "proof": ["<hex hash>", "..."],
+  "tree_size": 7968,
+  "root_hash": "<hex SHA-256>",
+  "checkpoint": "<signed checkpoint>",
+  "revoked": false,
+  "log_origin": "localhost/mtc-bridge"
+}
+```
+
+The `cert_meta` field provides parsed X.509 metadata including subject,
+issuer, SANs, key usage, validity period, and more — extracted from the
+raw DER certificate without requiring any external parsing tools.
+
 ---
 
 ## Project Structure
@@ -362,17 +494,20 @@ Results: 11 passed, 0 failed, 0 skipped
 ```
 cmd/
   mtc-bridge/          Main service binary
-  mtc-conformance/     Conformance test client (11 tests)
+  mtc-conformance/     Conformance test client (14 tests)
+  mtc-assertion/       CLI tool: fetch, verify, inspect assertion bundles
 internal/
-  admin/               HTMX dashboard (templates + handlers)
+  admin/               HTMX dashboard + certificate browser
+  assertion/           Assertion bundle builder + JSON/PEM formatter
   cadb/                Read-only MariaDB adapter for DigiCert CA
+  certutil/            X.509 DER parser for certificate metadata extraction
   config/              YAML config with env-var substitution
   cosigner/            Ed25519 key management + checkpoint signing
   issuancelog/         Entry construction + Merkle tree maintenance
   merkle/              RFC 9162 Merkle tree operations + inclusion proofs
   revocation/          Revocation bitfield construction
-  store/               PostgreSQL state store (6 tables)
-  tlogtiles/           C2SP tlog-tiles HTTP handler + proof API
+  store/               PostgreSQL state store (6 tables, search/detail queries)
+  tlogtiles/           C2SP tlog-tiles HTTP handler + proof + assertion API
   watcher/             CA database poller (certs + revocations)
 docs/
   adr/                 Architecture Decision Records (ADR-000 through ADR-008)
@@ -405,7 +540,7 @@ the full list).
 ## Running Tests
 
 ```bash
-# Unit tests (38 tests across merkle, config, cosigner, tlogtiles packages)
+# Unit tests (44 tests across merkle, config, cosigner, certutil, tlogtiles packages)
 make test
 
 # Conformance tests (requires a running mtc-bridge instance)

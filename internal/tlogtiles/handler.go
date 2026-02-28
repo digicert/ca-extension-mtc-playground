@@ -24,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/briantrzupek/ca-extension-merkle/internal/assertion"
 	"github.com/briantrzupek/ca-extension-merkle/internal/merkle"
 	"github.com/briantrzupek/ca-extension-merkle/internal/revocation"
 	"github.com/briantrzupek/ca-extension-merkle/internal/store"
@@ -31,24 +32,28 @@ import (
 
 // Handler serves the tlog-tiles HTTP API.
 type Handler struct {
-	store  *store.Store
-	revMgr *revocation.Manager
-	logger *slog.Logger
-	mux    *http.ServeMux
+	store     *store.Store
+	revMgr    *revocation.Manager
+	assertBld *assertion.Builder
+	logger    *slog.Logger
+	mux       *http.ServeMux
 }
 
 // New creates a new tlog-tiles Handler.
-func New(s *store.Store, revMgr *revocation.Manager, logger *slog.Logger) *Handler {
+func New(s *store.Store, revMgr *revocation.Manager, logOrigin string, logger *slog.Logger) *Handler {
 	h := &Handler{
-		store:  s,
-		revMgr: revMgr,
-		logger: logger,
-		mux:    http.NewServeMux(),
+		store:     s,
+		revMgr:    revMgr,
+		assertBld: assertion.NewBuilder(s, logOrigin),
+		logger:    logger,
+		mux:       http.NewServeMux(),
 	}
 	h.mux.HandleFunc("GET /checkpoint", h.handleCheckpoint)
 	h.mux.HandleFunc("GET /tile/", h.handleTile)
 	h.mux.HandleFunc("GET /revocation", h.handleRevocation)
 	h.mux.HandleFunc("GET /proof/inclusion", h.handleInclusionProof)
+	h.mux.HandleFunc("GET /assertion/{query}", h.handleAssertion)
+	h.mux.HandleFunc("GET /assertion/{query}/pem", h.handleAssertionPEM)
 	return h
 }
 
@@ -328,6 +333,69 @@ func (h *Handler) handleInclusionProof(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// handleAssertion serves an assertion bundle as JSON for a certificate
+// identified by serial number or log index.
+func (h *Handler) handleAssertion(w http.ResponseWriter, r *http.Request) {
+	query := r.PathValue("query")
+	if query == "" {
+		http.Error(w, "missing certificate serial or index", http.StatusBadRequest)
+		return
+	}
+
+	bundle, err := h.assertBld.Resolve(r.Context(), query)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "null sentinel") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		h.logger.Error("assertion: build bundle", "error", err, "query", query)
+		http.Error(w, "failed to build assertion bundle", http.StatusInternalServerError)
+		return
+	}
+
+	data, err := assertion.FormatJSON(bundle)
+	if err != nil {
+		h.logger.Error("assertion: format JSON", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(data)
+}
+
+// handleAssertionPEM serves an assertion bundle in PEM text format.
+func (h *Handler) handleAssertionPEM(w http.ResponseWriter, r *http.Request) {
+	query := r.PathValue("query")
+	if query == "" {
+		http.Error(w, "missing certificate serial or index", http.StatusBadRequest)
+		return
+	}
+
+	bundle, err := h.assertBld.Resolve(r.Context(), query)
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") || strings.Contains(err.Error(), "null sentinel") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		h.logger.Error("assertion: build bundle PEM", "error", err, "query", query)
+		http.Error(w, "failed to build assertion bundle", http.StatusInternalServerError)
+		return
+	}
+
+	data, err := assertion.FormatPEM(bundle)
+	if err != nil {
+		h.logger.Error("assertion: format PEM", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Write(data)
 }
 
 // decodeTileIndex decodes a C2SP tile index path.

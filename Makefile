@@ -21,7 +21,8 @@ build:
 	@mkdir -p bin
 	go build -o bin/mtc-bridge ./cmd/mtc-bridge/
 	go build -o bin/mtc-conformance ./cmd/mtc-conformance/
-	@echo "Built: bin/mtc-bridge, bin/mtc-conformance"
+	go build -o bin/mtc-assertion ./cmd/mtc-assertion/
+	@echo "Built: bin/mtc-bridge, bin/mtc-conformance, bin/mtc-assertion"
 
 # Test
 test:

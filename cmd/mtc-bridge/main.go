@@ -117,8 +117,8 @@ func main() {
 	w := watcher.New(caAdapter, stateStore, ilog, revMgr, watcherCfg, logger.With("component", "watcher"))
 
 	// Create HTTP handlers.
-	tlogHandler := tlogtiles.New(stateStore, revMgr, logger.With("component", "tlogtiles"))
-	adminHandler, err := admin.New(stateStore, w, logger.With("component", "admin"))
+	tlogHandler := tlogtiles.New(stateStore, revMgr, cfg.Log.Origin, logger.With("component", "tlogtiles"))
+	adminHandler, err := admin.New(stateStore, w, cfg.Log.Origin, logger.With("component", "admin"))
 	if err != nil {
 		logger.Error("failed to create admin handler", "error", err)
 		os.Exit(1)
@@ -130,6 +130,7 @@ func main() {
 	mux.Handle("/tile/", tlogHandler)
 	mux.Handle("/revocation", tlogHandler)
 	mux.Handle("/proof/", tlogHandler)
+	mux.Handle("/assertion/", tlogHandler)
 	mux.Handle("/admin", adminHandler)
 	mux.Handle("/admin/", adminHandler)
 

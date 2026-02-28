@@ -14,7 +14,10 @@ const dashboardHTML = `<!DOCTYPE html>
 	<nav class="bg-indigo-700 text-white px-6 py-4 shadow">
 		<div class="flex items-center justify-between max-w-7xl mx-auto">
 			<h1 class="text-xl font-bold">MTC Bridge Dashboard</h1>
-			<span class="text-sm opacity-75">Merkle Tree Certificates — Experimental</span>
+			<div class="flex gap-4 text-sm">
+				<a href="/admin" class="font-semibold underline">Dashboard</a>
+				<a href="/admin/certs" class="opacity-75 hover:opacity-100">Certificates</a>
+			</div>
 		</div>
 	</nav>
 
@@ -23,24 +26,36 @@ const dashboardHTML = `<!DOCTYPE html>
 		<section class="bg-white rounded-lg shadow p-6 mb-8"
 			hx-get="/admin/stats" hx-trigger="every 5s" hx-swap="innerHTML">
 			<h2 class="text-lg font-semibold mb-4">Log Statistics</h2>
-			<dl class="grid grid-cols-2 md:grid-cols-3 gap-4">
-				<dt class="text-gray-500">Tree Size</dt>
-				<dd class="text-2xl font-bold">{{ .Stats.TreeSize }}</dd>
-				<dt class="text-gray-500">Revocations</dt>
-				<dd class="text-2xl font-bold">{{ .Stats.RevocationCount }}</dd>
-				<dt class="text-gray-500">Checkpoints</dt>
-				<dd class="text-2xl font-bold">{{ .Stats.CheckpointCount }}</dd>
-				<dt class="text-gray-500">Watcher</dt>
-				<dd class="text-2xl font-bold">{{ if .WatcherStats.Running }}
-					<span class="text-green-600">Running</span>
-				{{ else }}
-					<span class="text-red-600">Stopped</span>
-				{{ end }}</dd>
-				<dt class="text-gray-500">Certs Processed</dt>
-				<dd class="text-2xl font-bold">{{ .WatcherStats.CertsProcessed }}</dd>
-				<dt class="text-gray-500">Latest Checkpoint</dt>
-				<dd class="text-sm">{{ formatTime .Stats.LatestCheckpoint }}</dd>
-			</dl>
+			<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-6">
+				<div>
+					<p class="text-gray-500 text-sm">Tree Size</p>
+					<p class="text-2xl font-bold">{{ .Stats.TreeSize }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Revocations</p>
+					<p class="text-2xl font-bold">{{ .Stats.RevocationCount }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Checkpoints</p>
+					<p class="text-2xl font-bold">{{ .Stats.CheckpointCount }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Watcher</p>
+					<p class="text-2xl font-bold">{{ if .WatcherStats.Running }}
+						<span class="text-green-600">Running</span>
+					{{ else }}
+						<span class="text-red-600">Stopped</span>
+					{{ end }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Certs Processed</p>
+					<p class="text-2xl font-bold">{{ .WatcherStats.CertsProcessed }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Latest Checkpoint</p>
+					<p class="text-sm font-medium mt-1">{{ formatTime .Stats.LatestCheckpoint }}</p>
+				</div>
+			</div>
 		</section>
 
 		<div class="grid md:grid-cols-2 gap-8">
@@ -96,6 +111,121 @@ const dashboardHTML = `<!DOCTYPE html>
 		</div>
 	</main>
 
+	<footer class="text-center text-gray-400 text-sm py-8">
+		mtc-bridge — Experimental MTC support for DigiCert Private CA
+	</footer>
+</body>
+</html>`
+
+const certBrowserHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>MTC Bridge — Certificate Browser</title>
+	<script src="https://cdn.tailwindcss.com"></script>
+	<script src="https://unpkg.com/htmx.org@2.0.4"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+	<nav class="bg-indigo-700 text-white px-6 py-4 shadow">
+		<div class="flex items-center justify-between max-w-7xl mx-auto">
+			<h1 class="text-xl font-bold">MTC Bridge Dashboard</h1>
+			<div class="flex gap-4 text-sm">
+				<a href="/admin" class="opacity-75 hover:opacity-100">Dashboard</a>
+				<a href="/admin/certs" class="font-semibold underline">Certificates</a>
+			</div>
+		</div>
+	</nav>
+
+	<main class="max-w-7xl mx-auto px-6 py-8">
+		<div class="bg-white rounded-lg shadow p-6">
+			<div class="flex items-center justify-between mb-6">
+				<h2 class="text-lg font-semibold">Certificate Browser</h2>
+				<div class="flex items-center gap-3">
+					<div class="flex rounded-lg border overflow-hidden text-sm" id="status-filter">
+						<button type="button"
+							class="px-3 py-2 bg-indigo-600 text-white font-medium"
+							hx-get="/admin/certs/search"
+							hx-target="#cert-results"
+							hx-include="#cert-search"
+							onclick="setFilter(this, '')">
+							All
+						</button>
+						<button type="button"
+							class="px-3 py-2 text-gray-600 hover:bg-gray-100"
+							hx-get="/admin/certs/search?status=revoked"
+							hx-target="#cert-results"
+							hx-include="#cert-search"
+							onclick="setFilter(this, 'revoked')">
+							Revoked
+						</button>
+					</div>
+					<input type="text" name="q" id="cert-search"
+						placeholder="Search by serial number..."
+						class="px-4 py-2 border rounded-lg text-sm w-80"
+						hx-get="/admin/certs/search"
+						hx-trigger="keyup changed delay:300ms"
+						hx-target="#cert-results"
+						hx-vals="js:{status: window._certStatusFilter || ''}">
+				</div>
+			</div>
+			<script>
+				window._certStatusFilter = '';
+				function setFilter(btn, value) {
+					window._certStatusFilter = value;
+					document.querySelectorAll('#status-filter button').forEach(function(b) {
+						b.className = 'px-3 py-2 text-gray-600 hover:bg-gray-100';
+					});
+					btn.className = 'px-3 py-2 bg-indigo-600 text-white font-medium';
+				}
+			</script>
+			<table class="w-full">
+				<thead>
+					<tr class="border-b text-left text-gray-500 text-sm">
+						<th class="px-3 py-2">Index</th>
+						<th class="px-3 py-2">Serial Number</th>
+						<th class="px-3 py-2">Created</th>
+						<th class="px-3 py-2">Status</th>
+					</tr>
+				</thead>
+				<tbody id="cert-results"
+					hx-get="/admin/certs/search"
+					hx-trigger="load"
+					hx-swap="innerHTML">
+				</tbody>
+			</table>
+		</div>
+	</main>
+
+	<footer class="text-center text-gray-400 text-sm py-8">
+		mtc-bridge — Experimental MTC support for DigiCert Private CA
+	</footer>
+`
+
+const certDetailStartHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>MTC Bridge — Certificate #%d</title>
+	<script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-50 min-h-screen">
+	<nav class="bg-indigo-700 text-white px-6 py-4 shadow">
+		<div class="flex items-center justify-between max-w-7xl mx-auto">
+			<h1 class="text-xl font-bold">MTC Bridge Dashboard</h1>
+			<div class="flex gap-4 text-sm">
+				<a href="/admin" class="opacity-75 hover:opacity-100">Dashboard</a>
+				<a href="/admin/certs" class="opacity-75 hover:opacity-100">Certificates</a>
+			</div>
+		</div>
+	</nav>
+	<main class="max-w-7xl mx-auto px-6 py-8">
+		<div class="mb-4"><a href="/admin/certs" class="text-indigo-600 hover:underline text-sm">← Back to certificates</a></div>
+`
+
+const certDetailEndHTML = `
+	</main>
 	<footer class="text-center text-gray-400 text-sm py-8">
 		mtc-bridge — Experimental MTC support for DigiCert Private CA
 	</footer>

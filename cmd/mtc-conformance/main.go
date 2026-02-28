@@ -54,6 +54,9 @@ func main() {
 		{"proof_api_inclusion", c.testProofAPIInclusion},
 		{"tile_caching", c.testTileCaching},
 		{"revocation_endpoint", c.testRevocationEndpoint},
+		{"assertion_bundle_json", c.testAssertionBundleJSON},
+		{"assertion_bundle_pem", c.testAssertionBundlePEM},
+		{"assertion_verify_proof", c.testAssertionVerifyProof},
 	}
 
 	for _, tt := range tests {
@@ -479,5 +482,163 @@ func (c *conformanceClient) testRevocationEndpoint() error {
 	if status != 200 {
 		return fmt.Errorf("expected 200, got %d", status)
 	}
+	return nil
+}
+
+func (c *conformanceClient) testAssertionBundleJSON() error {
+	if c.treeSize < 2 {
+		return errSkipped
+	}
+
+	// Fetch assertion bundle for index 1 (first real cert after null entry).
+	body, status, err := c.get("/assertion/1")
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("expected 200, got %d: %s", status, string(body))
+	}
+
+	var bundle struct {
+		LeafIndex int64    `json:"leaf_index"`
+		TreeSize  int64    `json:"tree_size"`
+		LeafHash  string   `json:"leaf_hash"`
+		RootHash  string   `json:"root_hash"`
+		Proof     []string `json:"proof"`
+		LogOrigin string   `json:"log_origin"`
+	}
+	if err := json.Unmarshal(body, &bundle); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	if bundle.LeafIndex != 1 {
+		return fmt.Errorf("leaf_index = %d, want 1", bundle.LeafIndex)
+	}
+	if bundle.TreeSize < 2 {
+		return fmt.Errorf("tree_size = %d, want >= 2", bundle.TreeSize)
+	}
+	if len(bundle.LeafHash) != 64 {
+		return fmt.Errorf("leaf_hash length = %d, want 64 hex chars", len(bundle.LeafHash))
+	}
+	if len(bundle.RootHash) != 64 {
+		return fmt.Errorf("root_hash length = %d, want 64 hex chars", len(bundle.RootHash))
+	}
+	if len(bundle.Proof) == 0 {
+		return fmt.Errorf("empty proof")
+	}
+	if bundle.LogOrigin == "" {
+		return fmt.Errorf("empty log_origin")
+	}
+
+	return nil
+}
+
+func (c *conformanceClient) testAssertionBundlePEM() error {
+	if c.treeSize < 2 {
+		return errSkipped
+	}
+
+	body, status, err := c.get("/assertion/1/pem")
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("expected 200, got %d: %s", status, string(body))
+	}
+
+	text := string(body)
+	if !strings.HasPrefix(text, "-----BEGIN MTC ASSERTION BUNDLE-----") {
+		return fmt.Errorf("missing PEM header")
+	}
+	if !strings.Contains(text, "-----END MTC ASSERTION BUNDLE-----") {
+		return fmt.Errorf("missing PEM footer")
+	}
+	if !strings.Contains(text, "Leaf-Index: 1") {
+		return fmt.Errorf("missing Leaf-Index header")
+	}
+	if !strings.Contains(text, "Log-Origin:") {
+		return fmt.Errorf("missing Log-Origin header")
+	}
+
+	return nil
+}
+
+func (c *conformanceClient) testAssertionVerifyProof() error {
+	if c.treeSize < 2 {
+		return errSkipped
+	}
+
+	// Fetch the assertion bundle.
+	body, status, err := c.get("/assertion/1")
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("expected 200, got %d", status)
+	}
+
+	var bundle struct {
+		LeafIndex int64    `json:"leaf_index"`
+		TreeSize  int64    `json:"tree_size"`
+		LeafHash  string   `json:"leaf_hash"`
+		RootHash  string   `json:"root_hash"`
+		Proof     []string `json:"proof"`
+	}
+	if err := json.Unmarshal(body, &bundle); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	// Decode hashes.
+	leafHash, err := hex.DecodeString(bundle.LeafHash)
+	if err != nil {
+		return fmt.Errorf("invalid leaf_hash: %w", err)
+	}
+	rootHash, err := hex.DecodeString(bundle.RootHash)
+	if err != nil {
+		return fmt.Errorf("invalid root_hash: %w", err)
+	}
+
+	proofHashes := make([][]byte, len(bundle.Proof))
+	for i, ph := range bundle.Proof {
+		proofHashes[i], err = hex.DecodeString(ph)
+		if err != nil {
+			return fmt.Errorf("invalid proof[%d]: %w", i, err)
+		}
+	}
+
+	// Verify: walk leaf hash up through proof to reconstruct root.
+	h := sha256.New()
+	current := make([]byte, 32)
+	copy(current, leafHash)
+	idx := bundle.LeafIndex
+	for _, sibling := range proofHashes {
+		h.Reset()
+		h.Write([]byte{0x01})
+		if idx%2 == 0 {
+			h.Write(current)
+			h.Write(sibling)
+		} else {
+			h.Write(sibling)
+			h.Write(current)
+		}
+		current = h.Sum(nil)
+		idx /= 2
+	}
+
+	for i := 0; i < 32; i++ {
+		if current[i] != rootHash[i] {
+			return fmt.Errorf("proof verification failed: root mismatch at byte %d", i)
+		}
+	}
+
+	// Also verify: fetching assertion for index 0 (null entry) returns 404.
+	_, status, err = c.get("/assertion/0")
+	if err != nil {
+		return fmt.Errorf("request for null entry failed: %w", err)
+	}
+	if status != 404 {
+		return fmt.Errorf("expected 404 for null entry assertion, got %d", status)
+	}
+
 	return nil
 }

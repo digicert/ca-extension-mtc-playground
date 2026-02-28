@@ -48,16 +48,19 @@ This is an **experimental/internal** implementation — simplified scope (no ext
 |---|---|
 | `cmd/mtc-bridge` | Main entry point: parse config, wire dependencies, start HTTP + watcher |
 | `cmd/mtc-conformance` | Independent conformance test client (shares ZERO code with internal/) |
+| `cmd/mtc-assertion` | CLI tool: fetch, verify, inspect assertion bundles (shares ZERO code with server) |
 | `internal/merkle` | RFC 9162 Merkle tree core: hashing, proofs, subtrees, tile computation |
 | `internal/config` | YAML configuration loading with env var substitution |
-| `internal/store` | PostgreSQL state store: log entries, tree nodes, checkpoints, events |
+| `internal/store` | PostgreSQL state store: log entries, tree nodes, checkpoints, events, cert search |
 | `internal/cadb` | MariaDB adapter for the DigiCert CA database (read-only) |
 | `internal/cosigner` | Ed25519 key management + MTC subtree/checkpoint signing |
 | `internal/issuancelog` | Issuance log management: TBSCertificateLogEntry construction, append, tree update |
 | `internal/revocation` | Revocation-by-index tracking: serial→index mapping, range compaction |
 | `internal/watcher` | Background polling loop: CA DB → issuance log → checkpoint |
-| `internal/tlogtiles` | HTTP handlers for the C2SP tlog-tiles API |
-| `internal/admin` | Admin dashboard: Go templates + HTMX, SSE for live events |
+| `internal/tlogtiles` | HTTP handlers for the C2SP tlog-tiles API + assertion bundle API |
+| `internal/admin` | Admin dashboard + certificate browser: Go templates + HTMX, SSE for live events |
+| `internal/assertion` | Assertion bundle builder + JSON/PEM formatter + proof verifier |
+| `internal/certutil` | X.509 DER parser for certificate metadata extraction (stdlib only) |
 
 ## Critical Invariants
 
@@ -123,3 +126,7 @@ Four tiers + conformance client:
 - [ADR-006: HTMX admin dashboard](../docs/adr/006-htmx-admin-dashboard.md)
 - [ADR-007: tlog-tiles serving protocol](../docs/adr/007-tlog-tiles-serving-protocol.md)
 - [ADR-008: Conformance test isolation](../docs/adr/008-conformance-test-isolation.md)
+
+## Phase Guides
+
+- [Phase 1: Assertion Bundle API & Certificate Browser](phase1-assertion-bundles.md)

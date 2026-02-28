@@ -107,6 +107,7 @@ var migrations = []string{
 	`CREATE INDEX IF NOT EXISTS idx_events_event_type ON events(event_type)`,
 	`CREATE INDEX IF NOT EXISTS idx_log_entries_serial ON log_entries(serial_hex)`,
 	`CREATE INDEX IF NOT EXISTS idx_checkpoints_tree_size ON checkpoints(tree_size)`,
+	`CREATE INDEX IF NOT EXISTS idx_log_entries_ca_cert_id ON log_entries(ca_cert_id)`,
 }
 
 // --- Log Entries ---
@@ -450,6 +451,184 @@ func (s *Store) FindEntryBySerial(ctx context.Context, serialHex string) (int64,
 		return 0, fmt.Errorf("store.FindEntryBySerial: %w", err)
 	}
 	return idx, nil
+}
+
+// SearchResult extends LogEntry with revocation status for search results.
+type SearchResult struct {
+	LogEntry
+	Revoked   bool       `json:"revoked"`
+	RevokedAt *time.Time `json:"revoked_at,omitempty"`
+}
+
+// SearchEntries searches log entries by serial number prefix, CA cert ID, or index.
+// The query is matched against serial_hex (ILIKE) and, if numeric, against idx.
+// Results are ordered by index descending and limited to the given count.
+func (s *Store) SearchEntries(ctx context.Context, query string, limit int) ([]*SearchResult, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT le.idx, le.entry_type, le.entry_data, le.cert_sha256, le.serial_hex,
+		        le.ca_cert_id, le.created_at, ri.revoked_at
+		 FROM log_entries le
+		 LEFT JOIN revoked_indices ri ON le.idx = ri.entry_idx
+		 WHERE le.serial_hex ILIKE $1 OR le.ca_cert_id = $2
+		 ORDER BY le.idx DESC
+		 LIMIT $3`,
+		"%"+query+"%", query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store.SearchEntries: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*SearchResult
+	for rows.Next() {
+		var r SearchResult
+		var certSHA256 []byte
+		var serialHex, caCertID sql.NullString
+		var revokedAt sql.NullTime
+		if err := rows.Scan(&r.Index, &r.EntryType, &r.EntryData, &certSHA256,
+			&serialHex, &caCertID, &r.CreatedAt, &revokedAt); err != nil {
+			return nil, fmt.Errorf("store.SearchEntries: scan: %w", err)
+		}
+		r.CertSHA256 = certSHA256
+		r.SerialHex = serialHex.String
+		r.CACertID = caCertID.String
+		if revokedAt.Valid {
+			r.Revoked = true
+			r.RevokedAt = &revokedAt.Time
+		}
+		results = append(results, &r)
+	}
+	return results, rows.Err()
+}
+
+// GetEntryDetail retrieves a log entry with revocation status by index.
+func (s *Store) GetEntryDetail(ctx context.Context, idx int64) (*SearchResult, error) {
+	var r SearchResult
+	var certSHA256 []byte
+	var serialHex, caCertID sql.NullString
+	var revokedAt sql.NullTime
+	err := s.db.QueryRowContext(ctx,
+		`SELECT le.idx, le.entry_type, le.entry_data, le.cert_sha256, le.serial_hex,
+		        le.ca_cert_id, le.created_at, ri.revoked_at
+		 FROM log_entries le
+		 LEFT JOIN revoked_indices ri ON le.idx = ri.entry_idx
+		 WHERE le.idx = $1`, idx).
+		Scan(&r.Index, &r.EntryType, &r.EntryData, &certSHA256,
+			&serialHex, &caCertID, &r.CreatedAt, &revokedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetEntryDetail: %w", err)
+	}
+	r.CertSHA256 = certSHA256
+	r.SerialHex = serialHex.String
+	r.CACertID = caCertID.String
+	if revokedAt.Valid {
+		r.Revoked = true
+		r.RevokedAt = &revokedAt.Time
+	}
+	return &r, nil
+}
+
+// RecentEntries returns the most recent n log entries with revocation status.
+func (s *Store) RecentEntries(ctx context.Context, limit int) ([]*SearchResult, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT le.idx, le.entry_type, le.entry_data, le.cert_sha256, le.serial_hex,
+		        le.ca_cert_id, le.created_at, ri.revoked_at
+		 FROM log_entries le
+		 LEFT JOIN revoked_indices ri ON le.idx = ri.entry_idx
+		 ORDER BY le.idx DESC
+		 LIMIT $1`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store.RecentEntries: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*SearchResult
+	for rows.Next() {
+		var r SearchResult
+		var certSHA256 []byte
+		var serialHex, caCertID sql.NullString
+		var revokedAt sql.NullTime
+		if err := rows.Scan(&r.Index, &r.EntryType, &r.EntryData, &certSHA256,
+			&serialHex, &caCertID, &r.CreatedAt, &revokedAt); err != nil {
+			return nil, fmt.Errorf("store.RecentEntries: scan: %w", err)
+		}
+		r.CertSHA256 = certSHA256
+		r.SerialHex = serialHex.String
+		r.CACertID = caCertID.String
+		if revokedAt.Valid {
+			r.Revoked = true
+			r.RevokedAt = &revokedAt.Time
+		}
+		results = append(results, &r)
+	}
+	return results, rows.Err()
+}
+
+// RevokedEntries returns revoked log entries, optionally filtered by a search query.
+func (s *Store) RevokedEntries(ctx context.Context, query string, limit int) ([]*SearchResult, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	if limit > 500 {
+		limit = 500
+	}
+
+	var rows *sql.Rows
+	var err error
+
+	if query == "" {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT le.idx, le.entry_type, le.entry_data, le.cert_sha256, le.serial_hex,
+			        le.ca_cert_id, le.created_at, ri.revoked_at
+			 FROM log_entries le
+			 INNER JOIN revoked_indices ri ON le.idx = ri.entry_idx
+			 ORDER BY ri.revoked_at DESC
+			 LIMIT $1`, limit)
+	} else {
+		rows, err = s.db.QueryContext(ctx,
+			`SELECT le.idx, le.entry_type, le.entry_data, le.cert_sha256, le.serial_hex,
+			        le.ca_cert_id, le.created_at, ri.revoked_at
+			 FROM log_entries le
+			 INNER JOIN revoked_indices ri ON le.idx = ri.entry_idx
+			 WHERE le.serial_hex ILIKE $1 OR le.ca_cert_id = $2
+			 ORDER BY ri.revoked_at DESC
+			 LIMIT $3`,
+			"%"+query+"%", query, limit)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("store.RevokedEntries: %w", err)
+	}
+	defer rows.Close()
+
+	var results []*SearchResult
+	for rows.Next() {
+		var r SearchResult
+		var certSHA256 []byte
+		var serialHex, caCertID sql.NullString
+		var revokedAt sql.NullTime
+		if err := rows.Scan(&r.Index, &r.EntryType, &r.EntryData, &certSHA256,
+			&serialHex, &caCertID, &r.CreatedAt, &revokedAt); err != nil {
+			return nil, fmt.Errorf("store.RevokedEntries: scan: %w", err)
+		}
+		r.CertSHA256 = certSHA256
+		r.SerialHex = serialHex.String
+		r.CACertID = caCertID.String
+		if revokedAt.Valid {
+			r.Revoked = true
+			r.RevokedAt = &revokedAt.Time
+		}
+		results = append(results, &r)
+	}
+	return results, rows.Err()
 }
 
 // --- Watcher Cursor ---
