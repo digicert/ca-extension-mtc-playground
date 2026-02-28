@@ -32,6 +32,11 @@ focused on transparency and auditability.
 | X.509 metadata extraction | Phase 1 | Parses DER certificates for display in bundles and UI |
 | Certificate browser | Phase 1 | Admin UI for searching/browsing certs with status badges |
 | `mtc-assertion` CLI | Phase 1 | Standalone tool to fetch, verify, and inspect assertion bundles |
+| Proactive assertion generation | Phase 2 | Background pipeline pre-computes bundles after each checkpoint |
+| Proof freshness management | Phase 2 | Detects and regenerates stale proofs as the tree grows |
+| Assertion polling endpoint | Phase 2 | `GET /assertions/pending` for downstream consumers |
+| Webhook notifications | Phase 2 | Push notifications with HMAC-SHA256 signing when assertions are ready |
+| Assertion statistics | Phase 2 | `GET /assertions/stats` + admin dashboard metrics |
 
 ### Not Implemented
 
@@ -41,7 +46,7 @@ focused on transparency and auditability.
 | Multi-cosigner coordination | MTC §5.5 | Only single local cosigner supported |
 | TLS 1.3 integration | MTC §6 | Requires TLS library modifications |
 | Signatureless certificates | MTC §4 | Needs TLS handshake integration to be useful |
-| ACME MTC extensions | MTC §7 | Out of scope for this demonstration |
+| ACME MTC extensions | MTC §7 | Planned for Phase 3 |
 | Browser relying-party logic | MTC §8 | Requires browser/client-side implementation |
 | Consistency proofs | RFC 9162 §2.1.4 | Not yet implemented (inclusion proofs only) |
 
@@ -67,12 +72,25 @@ focused on transparency and auditability.
                             │  │ checkpoint   │  │    (mtcbridge, :5432)
                             │  └─────┬───────┘  │
                             │        │          │
+                            │        │          │
+                            │  ┌─────▼───────┐  │
+                            │  │ assertion   │  │
+                            │  │ issuer      │  │  On each checkpoint:
+                            │  │ (Phase 2)   │  │  batch-build bundles,
+                            │  └─────┬───────┘  │  refresh stale proofs
+                            │        │          │
                             │  ┌─────▼───────┐  │
                             │  │ tlogtiles   │  │──► HTTP :8080
                             │  │ admin UI    │  │    /checkpoint, /tile/...
                             │  │ proofs      │  │    /proof/inclusion
                             │  │ assertions  │  │    /assertion/{query}
-                            │  └─────────────┘  │
+                            │  │ polling     │  │    /assertions/pending
+                            │  └──────┬──────┘  │
+                            │         │         │
+                            │    ┌────▼────┐    │
+                            │    │webhooks │    │──► POST to configured URLs
+                            │    │(optional│    │   HMAC-SHA256 signed
+                            │    └─────────┘    │
                             └──────────────────┘
 ```
 
@@ -384,7 +402,85 @@ Features:
 - **Detail pages** with parsed X.509 metadata, inclusion proof, and
   download links for JSON/PEM assertion bundles
 
-### Step 11 — Run the Full Conformance Suite
+### Step 11 — View Assertion Issuer Statistics
+
+The assertion issuer (Phase 2) automatically pre-computes assertion
+bundles in the background after each checkpoint. Check its progress:
+
+```bash
+# View aggregate assertion statistics
+curl -s $MTC_URL/assertions/stats | python3 -m json.tool
+```
+
+Example output:
+
+```json
+{
+  "total_bundles": 500,
+  "fresh_bundles": 500,
+  "stale_bundles": 0,
+  "pending_entries": 7468,
+  "last_generated": "2026-02-28T13:09:28Z"
+}
+```
+
+- **`total_bundles`** — assertion bundles generated so far
+- **`fresh_bundles`** — bundles with up-to-date inclusion proofs
+- **`stale_bundles`** — bundles needing proof refresh (tree has grown)
+- **`pending_entries`** — log entries without a bundle yet
+- **`last_generated`** — timestamp of the last generation cycle
+
+The issuer processes `batch_size` entries (default: 100) per checkpoint
+cycle (~60 seconds). Over time it converges to full coverage of the log.
+
+### Step 12 — Poll for Recently Generated Assertions
+
+Downstream consumers (e.g., an ACME server) can poll for newly generated
+assertion bundles:
+
+```bash
+# Get bundles generated since checkpoint 0 (all)
+curl -s "$MTC_URL/assertions/pending?since=0&limit=5" | python3 -m json.tool
+```
+
+Example output:
+
+```json
+{
+  "since": 0,
+  "count": 5,
+  "entries": [
+    {
+      "entry_idx": 1,
+      "serial_hex": "5BF2A7443A479D5600C6220D369208E325F31C62",
+      "checkpoint_id": 42,
+      "assertion_url": "/assertion/1",
+      "created_at": "2026-02-28T13:09:28Z"
+    }
+  ]
+}
+```
+
+Each entry includes a direct `assertion_url` to fetch the full bundle.
+Use the `since` parameter as a cursor — track the latest `checkpoint_id`
+you've seen and pass it as `since` on the next poll.
+
+### Step 13 — View Assertion Issuer in the Admin Dashboard
+
+The admin dashboard includes an Assertion Issuer metrics section:
+
+```bash
+open http://localhost:8080/admin/
+```
+
+The dashboard shows two stats grids:
+- **Log Statistics** — tree size, checkpoints, entries, revocations
+- **Assertion Issuer** — total bundles, fresh/stale/pending counts,
+  last generation time, and cycle duration
+
+These update automatically via HTMX polling.
+
+### Step 14 — Run the Full Conformance Suite
 
 ```bash
 make conformance
@@ -410,8 +506,11 @@ Target: http://localhost:8080
   assertion_bundle_json          [PASS]
   assertion_bundle_pem           [PASS]
   assertion_verify_proof         [PASS]
+  assertion_auto_generation      [PASS]
+  assertion_polling              [PASS]
+  assertion_stats                [PASS]
 
-Results: 14 passed, 0 failed, 0 skipped
+Results: 17 passed, 0 failed, 0 skipped
 ```
 
 ---
@@ -426,6 +525,8 @@ Results: 14 passed, 0 failed, 0 skipped
 | GET | `/proof/inclusion?serial=<hex>[&index=<n>]` | Inclusion proof for a certificate by serial number |
 | GET | `/assertion/{query}` | Assertion bundle as JSON (query by index or serial hex) |
 | GET | `/assertion/{query}/pem` | Assertion bundle in PEM-like text format |
+| GET | `/assertions/pending?since=<id>&limit=N` | Pre-computed bundles since a checkpoint (polling) |
+| GET | `/assertions/stats` | Assertion statistics: total, fresh, stale, pending counts |
 | GET | `/revocation` | Revocation bitfield (binary) |
 | GET | `/admin/` | HTMX admin dashboard |
 | GET | `/admin/certs` | Certificate browser with search |
@@ -487,6 +588,40 @@ The `cert_meta` field provides parsed X.509 metadata including subject,
 issuer, SANs, key usage, validity period, and more — extracted from the
 raw DER certificate without requiring any external parsing tools.
 
+### Assertion Polling Response (`/assertions/pending`)
+
+```json
+{
+  "since": 42,
+  "count": 3,
+  "entries": [
+    {
+      "entry_idx": 100,
+      "serial_hex": "5BF2A7443A479D5600C6220D369208E325F31C62",
+      "checkpoint_id": 43,
+      "assertion_url": "/assertion/100",
+      "created_at": "2026-02-28T13:09:28Z"
+    }
+  ]
+}
+```
+
+Use `since` as a cursor — pass the latest `checkpoint_id` you've processed
+to get only new bundles. The `assertion_url` field provides a direct link
+to fetch the full bundle.
+
+### Assertion Stats Response (`/assertions/stats`)
+
+```json
+{
+  "total_bundles": 500,
+  "fresh_bundles": 500,
+  "stale_bundles": 0,
+  "pending_entries": 7468,
+  "last_generated": "2026-02-28T13:09:28Z"
+}
+```
+
 ---
 
 ## Project Structure
@@ -494,11 +629,12 @@ raw DER certificate without requiring any external parsing tools.
 ```
 cmd/
   mtc-bridge/          Main service binary
-  mtc-conformance/     Conformance test client (14 tests)
+  mtc-conformance/     Conformance test client (17 tests)
   mtc-assertion/       CLI tool: fetch, verify, inspect assertion bundles
 internal/
   admin/               HTMX dashboard + certificate browser
   assertion/           Assertion bundle builder + JSON/PEM formatter
+  assertionissuer/     Background assertion generation pipeline + webhooks
   cadb/                Read-only MariaDB adapter for DigiCert CA
   certutil/            X.509 DER parser for certificate metadata extraction
   config/              YAML config with env-var substitution
@@ -506,7 +642,7 @@ internal/
   issuancelog/         Entry construction + Merkle tree maintenance
   merkle/              RFC 9162 Merkle tree operations + inclusion proofs
   revocation/          Revocation bitfield construction
-  store/               PostgreSQL state store (6 tables, search/detail queries)
+  store/               PostgreSQL state store (7 tables, search/detail/assertion queries)
   tlogtiles/           C2SP tlog-tiles HTTP handler + proof + assertion API
   watcher/             CA database poller (certs + revocations)
 docs/
@@ -530,6 +666,7 @@ sections:
 - **`ca_db`** — MariaDB connection for the DigiCert CA database (read-only)
 - **`watcher`** — Polling intervals for certificates and revocations
 - **`cosigner`** — Ed25519 key file path and key ID
+- **`assertion_issuer`** — Assertion generation pipeline (batch size, concurrency, webhooks)
 - **`http`** — Listen address, timeouts, cache TTLs
 
 Environment variables can override config values (see `docker-compose.yml` for
@@ -540,10 +677,10 @@ the full list).
 ## Running Tests
 
 ```bash
-# Unit tests (44 tests across merkle, config, cosigner, certutil, tlogtiles packages)
+# Unit tests (44+ tests across merkle, config, cosigner, certutil, tlogtiles packages)
 make test
 
-# Conformance tests (requires a running mtc-bridge instance)
+# Conformance tests (17 tests, requires a running mtc-bridge instance)
 make conformance
 
 # Go vet
