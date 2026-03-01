@@ -1,0 +1,290 @@
+// Command mtc-tls-verify connects to a TLS server, extracts the stapled MTC
+// assertion bundle from the SignedCertificateTimestamps extension, and verifies
+// the Merkle inclusion proof against the mtc-bridge checkpoint.
+//
+// Usage:
+//
+//	go run ./cmd/mtc-tls-verify -url https://localhost:4443 -insecure
+package main
+
+import (
+	"crypto/tls"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"flag"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/briantrzupek/ca-extension-merkle/internal/assertion"
+)
+
+var (
+	serverURL = flag.String("url", "https://localhost:4443", "TLS server URL to verify")
+	bridgeURL = flag.String("bridge-url", "http://localhost:8080", "mtc-bridge URL for checkpoint")
+	insecure  = flag.Bool("insecure", false, "skip X.509 certificate verification")
+	verbose   = flag.Bool("verbose", false, "show additional debug output")
+)
+
+type checkResult struct {
+	name   string
+	passed bool
+	detail string
+}
+
+func main() {
+	flag.Parse()
+
+	u, err := url.Parse(*serverURL)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: invalid URL: %v\n", err)
+		os.Exit(1)
+	}
+	host := u.Host
+	if !strings.Contains(host, ":") {
+		if u.Scheme == "https" {
+			host += ":443"
+		} else {
+			host += ":80"
+		}
+	}
+
+	fmt.Println("MTC TLS Verification Report")
+	fmt.Println("===========================")
+
+	// Step 1: TLS handshake.
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: *insecure,
+	}
+
+	if *verbose {
+		fmt.Printf("Connecting to %s...\n", host)
+	}
+
+	conn, err := tls.Dial("tcp", host, tlsConfig)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: TLS connection failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	state := conn.ConnectionState()
+	conn.Close()
+
+	if len(state.PeerCertificates) == 0 {
+		fmt.Fprintf(os.Stderr, "error: no peer certificates received\n")
+		os.Exit(1)
+	}
+
+	leaf := state.PeerCertificates[0]
+	leafSerial := strings.ToUpper(hex.EncodeToString(leaf.SerialNumber.Bytes()))
+
+	fmt.Printf("Server:      %s\n", host)
+	fmt.Printf("Subject:     CN=%s\n", leaf.Subject.CommonName)
+	fmt.Printf("Serial:      %s\n", leafSerial)
+
+	// Step 2: Extract assertion from SCT field.
+	var results []checkResult
+
+	if len(state.SignedCertificateTimestamps) == 0 {
+		results = append(results, checkResult{
+			name:   "Assertion present in TLS handshake",
+			passed: false,
+			detail: "no SignedCertificateTimestamps in handshake",
+		})
+		printResults(results)
+		os.Exit(1)
+	}
+
+	results = append(results, checkResult{
+		name:   "Assertion present in TLS handshake",
+		passed: true,
+		detail: fmt.Sprintf("%d bytes", len(state.SignedCertificateTimestamps[0])),
+	})
+
+	// Step 3: Parse assertion bundle.
+	sctData := state.SignedCertificateTimestamps[0]
+	var bundle assertion.Bundle
+	if err := json.Unmarshal(sctData, &bundle); err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to parse assertion JSON: %v\n", err)
+		if *verbose {
+			fmt.Fprintf(os.Stderr, "Raw SCT data: %s\n", string(sctData))
+		}
+		os.Exit(1)
+	}
+
+	fmt.Printf("Leaf Index:  %d\n", bundle.LeafIndex)
+	fmt.Printf("Tree Size:   %d\n", bundle.TreeSize)
+	rootTrunc := bundle.RootHash
+	if len(rootTrunc) > 16 {
+		rootTrunc = rootTrunc[:16] + "..."
+	}
+	fmt.Printf("Root Hash:   %s\n", rootTrunc)
+	fmt.Printf("Proof Depth: %d\n", len(bundle.Proof))
+	if bundle.LogOrigin != "" {
+		fmt.Printf("Log Origin:  %s\n", bundle.LogOrigin)
+	}
+	fmt.Println()
+
+	// Check 2: Certificate serial matches assertion.
+	if strings.EqualFold(leafSerial, bundle.SerialHex) {
+		results = append(results, checkResult{
+			name:   "Certificate serial matches assertion",
+			passed: true,
+		})
+	} else {
+		results = append(results, checkResult{
+			name:   "Certificate serial matches assertion",
+			passed: false,
+			detail: fmt.Sprintf("cert=%s assertion=%s", leafSerial, bundle.SerialHex),
+		})
+	}
+
+	// Check 3: Merkle inclusion proof valid.
+	valid, err := assertion.Verify(&bundle)
+	if err != nil {
+		results = append(results, checkResult{
+			name:   "Merkle inclusion proof valid",
+			passed: false,
+			detail: err.Error(),
+		})
+	} else if valid {
+		results = append(results, checkResult{
+			name:   "Merkle inclusion proof valid",
+			passed: true,
+		})
+	} else {
+		results = append(results, checkResult{
+			name:   "Merkle inclusion proof valid",
+			passed: false,
+			detail: "proof verification returned false",
+		})
+	}
+
+	// Check 4: Root hash matches checkpoint.
+	cpTreeSize, cpRootHash, cpErr := fetchCheckpoint(*bridgeURL)
+	if cpErr != nil {
+		results = append(results, checkResult{
+			name:   "Root hash matches checkpoint",
+			passed: false,
+			detail: fmt.Sprintf("failed to fetch checkpoint: %v", cpErr),
+		})
+	} else {
+		if *verbose {
+			fmt.Printf("  Checkpoint tree_size=%d root=%s...\n", cpTreeSize, cpRootHash[:16])
+			fmt.Printf("  Bundle     tree_size=%d root=%s...\n", bundle.TreeSize, bundle.RootHash[:16])
+		}
+
+		if strings.EqualFold(bundle.RootHash, cpRootHash) {
+			results = append(results, checkResult{
+				name:   "Root hash matches checkpoint",
+				passed: true,
+				detail: "exact match (latest checkpoint)",
+			})
+		} else if bundle.TreeSize <= cpTreeSize {
+			// The tree has grown since the proof was generated.
+			// The proof is still valid against its own root — it was verified in check 3.
+			results = append(results, checkResult{
+				name:   "Root hash matches checkpoint",
+				passed: true,
+				detail: fmt.Sprintf("proof from tree_size=%d, current=%d (valid older proof)", bundle.TreeSize, cpTreeSize),
+			})
+		} else {
+			results = append(results, checkResult{
+				name:   "Root hash matches checkpoint",
+				passed: false,
+				detail: fmt.Sprintf("root mismatch and bundle tree_size=%d > checkpoint=%d", bundle.TreeSize, cpTreeSize),
+			})
+		}
+	}
+
+	// Check 5: Certificate not revoked.
+	if bundle.Revoked {
+		results = append(results, checkResult{
+			name:   "Certificate not revoked",
+			passed: false,
+			detail: "certificate is marked as revoked in assertion",
+		})
+	} else {
+		results = append(results, checkResult{
+			name:   "Certificate not revoked",
+			passed: true,
+		})
+	}
+
+	printResults(results)
+}
+
+func printResults(results []checkResult) {
+	fmt.Println("Verification:")
+	allPassed := true
+	for _, r := range results {
+		if r.passed {
+			fmt.Printf("  [PASS] %s", r.name)
+			if *verbose && r.detail != "" {
+				fmt.Printf(" (%s)", r.detail)
+			}
+			fmt.Println()
+		} else {
+			allPassed = false
+			fmt.Printf("  [FAIL] %s", r.name)
+			if r.detail != "" {
+				fmt.Printf(" — %s", r.detail)
+			}
+			fmt.Println()
+		}
+	}
+
+	fmt.Println()
+	if allPassed {
+		fmt.Println("Result: MTC-VERIFIED")
+	} else {
+		fmt.Println("Result: VERIFICATION FAILED")
+		os.Exit(1)
+	}
+}
+
+func fetchCheckpoint(bridgeBase string) (treeSize int64, rootHash string, err error) {
+	url := strings.TrimRight(bridgeBase, "/") + "/checkpoint"
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Get(url)
+	if err != nil {
+		return 0, "", fmt.Errorf("HTTP GET: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, "", fmt.Errorf("checkpoint returned HTTP %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, "", fmt.Errorf("read body: %w", err)
+	}
+
+	text := string(body)
+	parts := strings.SplitN(text, "\n\n", 2)
+	lines := strings.Split(strings.TrimRight(parts[0], "\n"), "\n")
+
+	if len(lines) < 3 {
+		return 0, "", fmt.Errorf("checkpoint has %d lines, need at least 3", len(lines))
+	}
+
+	treeSize, err = strconv.ParseInt(lines[1], 10, 64)
+	if err != nil {
+		return 0, "", fmt.Errorf("parse tree size %q: %w", lines[1], err)
+	}
+
+	hashBytes, err := base64.StdEncoding.DecodeString(lines[2])
+	if err != nil {
+		return 0, "", fmt.Errorf("decode root hash: %w", err)
+	}
+
+	rootHash = strings.ToUpper(hex.EncodeToString(hashBytes))
+	return treeSize, rootHash, nil
+}

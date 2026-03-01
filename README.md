@@ -45,6 +45,8 @@ focused on transparency and auditability.
 | http-01 challenge validation | Phase 3 / RFC 8555 §8.3 | Auto-approve mode for internal CAs, real HTTP validation path |
 | CA proxy (finalize) | Phase 3 | Proxies CSR to DigiCert CA REST API, polls for assertion bundle |
 | Certificate + assertion download | Phase 3 | PEM certificate with appended assertion bundle proof |
+| TLS assertion stapling demo | Phase 4 | Server staples assertions via SCT field; client verifies inline |
+| TLS verification client | Phase 4 | Extracts + verifies Merkle proof from TLS handshake |
 
 ### Not Implemented
 
@@ -52,7 +54,7 @@ focused on transparency and auditability.
 |---|---|---|
 | External cosigner protocol | MTC §5.5 | Requires distributed coordination infrastructure |
 | Multi-cosigner coordination | MTC §5.5 | Only single local cosigner supported |
-| TLS 1.3 integration | MTC §6 | Requires TLS library modifications |
+| TLS 1.3 custom extension | MTC §6 | Go `crypto/tls` does not support custom extensions; demo uses SCT field |
 | Signatureless certificates | MTC §4 | Needs TLS handshake integration to be useful |
 | Browser relying-party logic | MTC §8 | Requires browser/client-side implementation |
 | Consistency proofs | RFC 9162 §2.1.4 | Not yet implemented (inclusion proofs only) |
@@ -232,6 +234,74 @@ The ACME server starts on `https://localhost:8443` (TLS with self-signed cert).
    ./demo-acme.sh
    ```
    This automates key/CSR generation, ACME directory/nonce fetch, and guides you to run conformance tests for full flow.
+
+---
+
+## TLS Assertion Stapling Demo (Phase 4)
+
+Phase 4 demonstrates how MTC assertion bundles travel inside a TLS handshake.
+The `mtc-tls-server` staples the Merkle inclusion proof to every TLS connection
+via the `SignedCertificateTimestamps` extension, and `mtc-tls-verify` connects,
+extracts, and cryptographically verifies the proof.
+
+### How It Works
+
+Go's `crypto/tls` supports a `SignedCertificateTimestamps` field on
+`tls.Certificate` — byte slices placed here are delivered to the client during
+the TLS handshake. We repurpose this CT mechanism to carry the MTC assertion
+bundle (JSON-encoded). The client reads it from `ConnectionState()` and verifies
+the Merkle inclusion proof against the bridge's checkpoint.
+
+### Quick Start
+
+```bash
+# 1. Ensure mtc-bridge is running with certificates in the log
+make run  # or docker compose up -d
+
+# 2. Build Phase 4 binaries
+make build
+
+# 3. Start the TLS server (use a cert that's in the bridge's log)
+./bin/mtc-tls-server -cert cert.pem -key key.pem -bridge-url http://localhost:8080
+
+# 4. In another terminal, verify the TLS assertion
+./bin/mtc-tls-verify -url https://localhost:4443 -insecure
+```
+
+Or run the fully automated demo (issues a fresh cert via the CA, waits for the
+assertion, and runs the verification):
+
+```bash
+./demo-tls.sh
+```
+
+### Verification Output
+
+```
+MTC TLS Verification Report
+===========================
+Server:      localhost:4443
+Subject:     CN=tls-demo.meridianfs.com
+Serial:      AB12CD34...
+Leaf Index:  42
+Tree Size:   8192
+Root Hash:   abc123def456...
+Proof Depth: 13
+
+Verification:
+  [PASS] Assertion present in TLS handshake
+  [PASS] Certificate serial matches assertion
+  [PASS] Merkle inclusion proof valid
+  [PASS] Root hash matches checkpoint
+  [PASS] Certificate not revoked
+
+Result: MTC-VERIFIED
+```
+
+### Server Status Page
+
+Visit `https://localhost:4443/` in a browser to see the MTC status page, or
+fetch `https://localhost:4443/mtc-status` for JSON.
 
 ---
 
@@ -858,6 +928,8 @@ cmd/
   mtc-bridge/          Main service binary
   mtc-conformance/     Conformance test client (23 tests)
   mtc-assertion/       CLI tool: fetch, verify, inspect assertion bundles
+  mtc-tls-server/      Demo TLS server with MTC assertion stapling
+  mtc-tls-verify/      TLS verification client — extracts and verifies assertions
 internal/
   acme/                RFC 8555 ACME server (JWS, nonce, accounts, orders, challenges, CA proxy)
   admin/               HTMX dashboard + certificate browser + visualization explorer

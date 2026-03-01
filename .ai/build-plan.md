@@ -138,34 +138,38 @@ See [phase3-acme-server.md](phase3-acme-server.md) for full details.
 
 ---
 
-## Phase 4 — TLS Handshake Integration (DEFERRED)
+## Phase 4 — TLS Assertion Stapling Demo (COMPLETE)
 
-**Goal:** Enable web servers to staple MTC assertion bundles into the TLS 1.3 handshake, allowing clients to verify certificate transparency inline.
+**Goal:** Demonstrate MTC assertion delivery through a TLS handshake, completing the full transparency pipeline from CA issuance through client-side proof verification.
 
-### Why Deferred
+**Delivered:**
+- `cmd/mtc-tls-server` — HTTPS server that fetches assertion bundles from mtc-bridge and staples them to TLS handshakes via the `SignedCertificateTimestamps` extension field
+- `cmd/mtc-tls-verify` — CLI client that connects, extracts the assertion, and verifies the Merkle inclusion proof against the bridge's checkpoint
+- `demo-tls.sh` — Automated end-to-end demo script
+- Background assertion refresh with thread-safe access
+- 5-point verification: assertion presence, serial match, proof validity, checkpoint match, revocation status
 
-- Requires modifications to TLS libraries (Go's `crypto/tls` or OpenSSL)
-- MTC §6 defines a new TLS extension and Certificate message format
-- Browser/client-side relying-party logic also needed
-- Significantly more complex than Phases 1-3
+**Approach:** Go's `crypto/tls` doesn't support custom TLS extensions (golang/go#51497). The demo uses `tls.Certificate.SignedCertificateTimestamps` to carry the assertion JSON — repurposing CT's SCT delivery mechanism for MTC.
 
-### Future Scope
+**Status:** Committed on `main`.
 
-1. TLS 1.3 extension for MTC assertion delivery (MTC §6)
-2. Modified Certificate message with assertion bundle
-3. Go TLS server integration (patched `crypto/tls`)
-4. Client-side verification library
-5. Browser extension proof-of-concept
+See [phase4-tls-stapling.md](phase4-tls-stapling.md) for full details.
+
+### Remaining TLS Scope (not implemented)
+
+- Custom TLS extension per MTC §6 (requires `crypto/tls` fork or uTLS)
+- Signatureless certificates per MTC §4
+- Browser relying-party verification per MTC §8
 
 ---
 
 ## Timeline & Dependencies
 
 ```
-Phase 1 (DONE) ──► Phase 2 (DONE) ──► Phase 3 (DONE) ──► Phase 4 (TLS, deferred)
+Phase 1 (DONE) ──► Phase 2 (DONE) ──► Phase 3 (DONE) ──► Phase 4 (DONE)
 ```
 
 - Phase 2 depends on Phase 1's assertion package and store methods
 - Phase 3 depends on Phase 2's polling endpoint and assertion store
 - Phase 4 depends on Phase 3 for end-to-end cert + assertion delivery
-- Phases 1-3 are complete; Phase 4 paused pending TLS ecosystem readiness
+- All 4 phases complete
