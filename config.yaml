@@ -60,7 +60,7 @@ acme:
   addr: ":8443"
   external_url: "https://localhost:8443"
   ca_url: "${CA_URL:-http://localhost}"
-  ca_api_key: "${CA_API_KEY:-010d292eea2aae809fa845ff78a68a14e93c215489b46e3ffdea6603fe0a2db0517940327c8c2123e2da794baad0bf19a9}"
+  ca_api_key: "${CA_API_KEY}"
   ca_id: "${CA_ID:-}"
   template_id: "${CA_TEMPLATE_ID:-}"
   mtc_bridge_url: "${MTC_BRIDGE_URL:-http://localhost:8080}"

@@ -1,6 +1,7 @@
 # MTC Bridge build artifacts
 bin/
 keys/
+gen-certs
 
 # Go
 *.exe

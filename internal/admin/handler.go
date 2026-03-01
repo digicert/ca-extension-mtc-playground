@@ -94,6 +94,7 @@ func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOri
 	h.mux.HandleFunc("GET /admin/viz/revocations", h.handleVizRevocations)
 	h.mux.HandleFunc("GET /admin/viz/stats", h.handleVizStats)
 	h.mux.HandleFunc("GET /admin/viz/proof/{index}", h.handleVizProof)
+	h.mux.HandleFunc("GET /admin/viz/cert-info/{index}", h.handleVizCertInfo)
 
 	return h, nil
 }
@@ -417,9 +418,15 @@ func (h *Handler) handleCertDetail(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, certDetailStartHTML, idx)
 
+	// Two-column layout: info cards on left, actions sidebar on right.
+	fmt.Fprint(w, `<div class="grid grid-cols-1 lg:grid-cols-[1fr_240px] gap-6 mb-6">`)
+
+	// Left column: info cards.
+	fmt.Fprint(w, `<div class="space-y-6">`)
+
 	// Certificate Info card.
 	if certMeta != nil {
-		fmt.Fprint(w, `<div class="bg-white rounded-lg shadow p-6 mb-6">`)
+		fmt.Fprint(w, `<div class="bg-white rounded-lg shadow p-6">`)
 		fmt.Fprint(w, `<h2 class="text-lg font-semibold mb-4">Certificate Details</h2>`)
 		fmt.Fprint(w, `<dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2 text-sm">`)
 		certField(w, "Common Name", certMeta.CommonName)
@@ -453,14 +460,14 @@ func (h *Handler) handleCertDetail(w http.ResponseWriter, r *http.Request) {
 		if bundle.RevokedAt != nil {
 			revokedAt = bundle.RevokedAt.Format("2006-01-02 15:04:05 UTC")
 		}
-		fmt.Fprintf(w, `<div class="bg-red-50 border border-red-200 rounded-lg p-4 mb-6">
-			<span class="font-semibold text-red-800">⚠ Certificate Revoked</span>
+		fmt.Fprintf(w, `<div class="bg-red-50 border border-red-200 rounded-lg p-4">
+			<span class="font-semibold text-red-800">Certificate Revoked</span>
 			<span class="text-sm text-red-600 ml-2">at %s</span>
 		</div>`, revokedAt)
 	}
 
 	// Inclusion proof card.
-	fmt.Fprint(w, `<div class="bg-white rounded-lg shadow p-6 mb-6">`)
+	fmt.Fprint(w, `<div class="bg-white rounded-lg shadow p-6">`)
 	fmt.Fprint(w, `<h2 class="text-lg font-semibold mb-4">Merkle Inclusion Proof</h2>`)
 	fmt.Fprint(w, `<dl class="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-2 text-sm">`)
 	certField(w, "Leaf Index", fmt.Sprintf("%d", bundle.LeafIndex))
@@ -481,11 +488,32 @@ func (h *Handler) handleCertDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	fmt.Fprint(w, `</div>`)
 
-	// Download links.
-	fmt.Fprintf(w, `<div class="flex gap-4 mb-6">
-		<a href="/assertion/%d" class="px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm">Download JSON Bundle</a>
-		<a href="/assertion/%d/pem" class="px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 text-sm">Download PEM Bundle</a>
+	fmt.Fprint(w, `</div>`) // end left column
+
+	// Right column: actions sidebar.
+	fmt.Fprint(w, `<div class="space-y-4 lg:sticky lg:top-8 lg:self-start">`)
+
+	// Download section.
+	fmt.Fprint(w, `<div class="bg-white rounded-lg shadow p-5">`)
+	fmt.Fprint(w, `<h3 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Download</h3>`)
+	fmt.Fprintf(w, `<div class="flex flex-col gap-2">
+		<a href="/assertion/%d" class="block text-center px-4 py-2 bg-indigo-600 text-white rounded hover:bg-indigo-700 text-sm">JSON Bundle</a>
+		<a href="/assertion/%d/pem" class="block text-center px-4 py-2 bg-gray-600 text-white rounded hover:bg-gray-700 text-sm">PEM Bundle</a>
 	</div>`, idx, idx)
+	fmt.Fprint(w, `</div>`)
+
+	// Visualize section.
+	fmt.Fprint(w, `<div class="bg-white rounded-lg shadow p-5">`)
+	fmt.Fprint(w, `<h3 class="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-3">Visualize</h3>`)
+	fmt.Fprintf(w, `<div class="flex flex-col gap-2">
+		<a href="/admin/viz?tab=proof&index=%d" class="block text-center px-4 py-2 border border-indigo-600 text-indigo-600 rounded hover:bg-indigo-50 text-sm">Proof Explorer</a>
+		<a href="/admin/viz?tab=sunburst&index=%d" class="block text-center px-4 py-2 border border-indigo-600 text-indigo-600 rounded hover:bg-indigo-50 text-sm">Sunburst</a>
+		<a href="/admin/viz?tab=treemap&index=%d" class="block text-center px-4 py-2 border border-indigo-600 text-indigo-600 rounded hover:bg-indigo-50 text-sm">Treemap</a>
+	</div>`, idx, idx, idx)
+	fmt.Fprint(w, `</div>`)
+
+	fmt.Fprint(w, `</div>`) // end right column
+	fmt.Fprint(w, `</div>`) // end grid
 
 	// Certificate PEM.
 	if certPEM != "" {
@@ -687,6 +715,29 @@ func (h *Handler) handleVizProof(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+// handleVizCertInfo returns a certificate's position in the visualization hierarchy.
+func (h *Handler) handleVizCertInfo(w http.ResponseWriter, r *http.Request) {
+	idxStr := r.PathValue("index")
+	idx, err := strconv.ParseInt(idxStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid index", http.StatusBadRequest)
+		return
+	}
+
+	caName, batchWindow, keyAlgo, err := h.store.GetCertLocation(r.Context(), idx)
+	if err != nil {
+		http.Error(w, "certificate metadata not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"ca":    caName,
+		"batch": batchWindow.Format("Jan 2 15:04"),
+		"algo":  keyAlgo,
+	})
 }
 
 // Suppress unused import warnings.

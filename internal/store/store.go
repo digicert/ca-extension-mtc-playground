@@ -1641,6 +1641,17 @@ func (s *Store) PopulateCertMetadata(ctx context.Context, caNames map[string]str
 	return int64(len(pending)), nil
 }
 
+// GetCertLocation returns a certificate's position in the visualization hierarchy.
+func (s *Store) GetCertLocation(ctx context.Context, idx int64) (caName string, batchWindow time.Time, keyAlgo string, err error) {
+	err = s.db.QueryRowContext(ctx,
+		`SELECT ca_name, batch_window, key_algorithm FROM cert_metadata WHERE entry_idx = $1`, idx,
+	).Scan(&caName, &batchWindow, &keyAlgo)
+	if err != nil {
+		err = fmt.Errorf("store.GetCertLocation: %w", err)
+	}
+	return
+}
+
 // GetVizSummary returns the aggregated certificate hierarchy for visualization.
 func (s *Store) GetVizSummary(ctx context.Context) (*VizSummary, error) {
 	rows, err := s.db.QueryContext(ctx,

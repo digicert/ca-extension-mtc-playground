@@ -1323,7 +1323,31 @@ const vizExplorerHTML = `<!DOCTYPE html>
 
 	// Init
 	window.addEventListener('resize', redraw);
-	loadData();
+	(async function init() {
+		await loadData();
+		const params = new URLSearchParams(window.location.search);
+		const tab = params.get('tab');
+		const index = params.get('index');
+		if (tab && ['sunburst', 'treemap', 'proof'].includes(tab)) {
+			switchView(tab);
+		}
+		if (index !== null && index !== '') {
+			if (tab === 'proof') {
+				document.getElementById('proofIndex').value = index;
+				loadProof();
+			} else if (tab === 'sunburst' || tab === 'treemap') {
+				try {
+					const res = await fetch('/admin/viz/cert-info/' + index);
+					if (res.ok) {
+						const info = await res.json();
+						if (info.ca) drillIntoByName(info.ca);
+						if (info.batch) drillIntoByName(info.batch);
+						if (info.algo) drillIntoByName(info.algo);
+					}
+				} catch (e) { console.warn('cert-info lookup failed:', e); }
+			}
+		}
+	})();
 	</script>
 </body>
 </html>`
