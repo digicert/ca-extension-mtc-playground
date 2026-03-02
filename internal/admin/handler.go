@@ -95,6 +95,7 @@ func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOri
 	h.mux.HandleFunc("GET /admin/viz/stats", h.handleVizStats)
 	h.mux.HandleFunc("GET /admin/viz/proof/{index}", h.handleVizProof)
 	h.mux.HandleFunc("GET /admin/viz/cert-info/{index}", h.handleVizCertInfo)
+	h.mux.HandleFunc("GET /admin/viz/subtree", h.handleVizSubtree)
 
 	return h, nil
 }
@@ -738,6 +739,133 @@ func (h *Handler) handleVizCertInfo(w http.ResponseWriter, r *http.Request) {
 		"batch": batchWindow.Format("Jan 2 15:04"),
 		"algo":  keyAlgo,
 	})
+}
+
+// handleVizSubtree returns a power-of-2 aligned subtree slice from the live Merkle tree.
+func (h *Handler) handleVizSubtree(w http.ResponseWriter, r *http.Request) {
+	// Parse params.
+	sizeParam := r.URL.Query().Get("size")
+	subtreeSize := 8
+	if sizeParam != "" {
+		if s, err := strconv.Atoi(sizeParam); err == nil && (s == 4 || s == 8 || s == 16) {
+			subtreeSize = s
+		}
+	}
+
+	startParam := r.URL.Query().Get("start")
+	start := int64(0)
+	if startParam != "" {
+		if s, err := strconv.ParseInt(startParam, 10, 64); err == nil && s >= 0 {
+			start = s
+		}
+	}
+	// Align start down to nearest multiple of subtreeSize.
+	start = (start / int64(subtreeSize)) * int64(subtreeSize)
+
+	// Get tree bounds.
+	cp, err := h.store.LatestCheckpoint(r.Context())
+	if err != nil {
+		h.logger.Error("admin: viz subtree: latest checkpoint", "error", err)
+		http.Error(w, "no checkpoint available", http.StatusServiceUnavailable)
+		return
+	}
+
+	if start >= cp.TreeSize {
+		start = (cp.TreeSize - 1) / int64(subtreeSize) * int64(subtreeSize)
+	}
+
+	// Actual number of leaves in this subtree (may be < subtreeSize at end of tree).
+	actualLeaves := int64(subtreeSize)
+	if start+actualLeaves > cp.TreeSize {
+		actualLeaves = cp.TreeSize - start
+	}
+
+	// Fetch nodes at each level using existing GetTileHashes.
+	type subtreeNode struct {
+		Index      int64  `json:"index"`
+		Hash       string `json:"hash"`
+		CommonName string `json:"commonName,omitempty"`
+		CA         string `json:"ca,omitempty"`
+		Algorithm  string `json:"algorithm,omitempty"`
+		IsPQ       bool   `json:"isPQ,omitempty"`
+		Revoked    bool   `json:"revoked,omitempty"`
+	}
+	type subtreeLevel struct {
+		Level int            `json:"level"`
+		Nodes []subtreeNode  `json:"nodes"`
+	}
+
+	depth := 0
+	for s := subtreeSize; s > 1; s >>= 1 {
+		depth++
+	}
+
+	levels := make([]subtreeLevel, 0, depth+1)
+
+	for level := 0; level <= depth; level++ {
+		levelStart := start >> uint(level)
+		levelCount := int64(subtreeSize) >> uint(level)
+		if levelCount < 1 {
+			levelCount = 1
+		}
+
+		hashes, err := h.store.GetTileHashes(r.Context(), level, levelStart, int(levelCount))
+		if err != nil {
+			h.logger.Error("admin: viz subtree: get tile hashes", "level", level, "error", err)
+			http.Error(w, "failed to fetch tree nodes", http.StatusInternalServerError)
+			return
+		}
+
+		nodes := make([]subtreeNode, len(hashes))
+		for i, hash := range hashes {
+			nodes[i] = subtreeNode{
+				Index: levelStart + int64(i),
+				Hash:  hex.EncodeToString(hash[:]),
+			}
+		}
+
+		levels = append(levels, subtreeLevel{Level: level, Nodes: nodes})
+	}
+
+	// Fetch cert metadata for leaves.
+	leafInfos, err := h.store.GetSubtreeLeafInfo(r.Context(), start, start+actualLeaves)
+	if err != nil {
+		h.logger.Warn("admin: viz subtree: leaf info", "error", err)
+		// Non-fatal — we just won't have labels.
+	} else {
+		infoMap := make(map[int64]store.SubtreeLeafInfo, len(leafInfos))
+		for _, info := range leafInfos {
+			infoMap[info.EntryIdx] = info
+		}
+		if len(levels) > 0 {
+			for i := range levels[0].Nodes {
+				if info, ok := infoMap[levels[0].Nodes[i].Index]; ok {
+					levels[0].Nodes[i].CommonName = info.CommonName
+					levels[0].Nodes[i].CA = info.CAName
+					levels[0].Nodes[i].Algorithm = info.KeyAlgorithm
+					levels[0].Nodes[i].IsPQ = info.IsPQ
+					levels[0].Nodes[i].Revoked = info.Revoked
+				}
+			}
+		}
+	}
+
+	resp := struct {
+		TreeSize       int64          `json:"treeSize"`
+		SubtreeStart   int64          `json:"subtreeStart"`
+		SubtreeSize    int            `json:"subtreeSize"`
+		GlobalRootHash string         `json:"globalRootHash"`
+		Levels         []subtreeLevel `json:"levels"`
+	}{
+		TreeSize:       cp.TreeSize,
+		SubtreeStart:   start,
+		SubtreeSize:    subtreeSize,
+		GlobalRootHash: hex.EncodeToString(cp.RootHash),
+		Levels:         levels,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 // Suppress unused import warnings.

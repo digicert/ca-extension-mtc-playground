@@ -1,0 +1,449 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Merkle Tree Visualization</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      background: #0f172a;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 20px;
+    }
+    h1 {
+      text-align: center;
+      font-size: 1.8rem;
+      margin-bottom: 6px;
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .subtitle {
+      text-align: center;
+      color: #94a3b8;
+      margin-bottom: 20px;
+      font-size: 0.95rem;
+    }
+    .controls {
+      display: flex;
+      justify-content: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-bottom: 24px;
+    }
+    .controls input {
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid #334155;
+      background: #1e293b;
+      color: #e2e8f0;
+      font-size: 0.9rem;
+      width: 140px;
+    }
+    .controls button {
+      padding: 8px 18px;
+      border-radius: 8px;
+      border: none;
+      font-size: 0.9rem;
+      cursor: pointer;
+      font-weight: 600;
+      transition: all 0.2s;
+    }
+    .btn-add {
+      background: linear-gradient(135deg, #38bdf8, #818cf8);
+      color: #0f172a;
+    }
+    .btn-add:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(56,189,248,0.3); }
+    .btn-reset {
+      background: #334155;
+      color: #e2e8f0;
+    }
+    .btn-reset:hover { background: #475569; }
+    .btn-verify {
+      background: linear-gradient(135deg, #34d399, #22d3ee);
+      color: #0f172a;
+    }
+    .btn-verify:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(52,211,153,0.3); }
+    .tree-container {
+      overflow-x: auto;
+      padding: 20px 10px;
+    }
+    svg {
+      display: block;
+      margin: 0 auto;
+    }
+    .node-group { cursor: pointer; }
+    .node-rect {
+      rx: 10; ry: 10;
+      transition: all 0.3s;
+    }
+    .node-group:hover .node-rect {
+      filter: brightness(1.3);
+    }
+    .node-label {
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-size: 11px;
+      fill: #e2e8f0;
+      text-anchor: middle;
+      pointer-events: none;
+    }
+    .node-hash {
+      font-family: 'Courier New', monospace;
+      font-size: 9.5px;
+      fill: #94a3b8;
+      text-anchor: middle;
+      pointer-events: none;
+    }
+    .edge {
+      stroke: #475569;
+      stroke-width: 2;
+      fill: none;
+    }
+    .edge.highlighted {
+      stroke: #fbbf24;
+      stroke-width: 3;
+      filter: drop-shadow(0 0 4px rgba(251,191,36,0.5));
+    }
+    .node-rect.highlighted {
+      filter: drop-shadow(0 0 8px rgba(251,191,36,0.6));
+    }
+    .legend {
+      display: flex;
+      justify-content: center;
+      gap: 24px;
+      margin-top: 16px;
+      flex-wrap: wrap;
+    }
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 0.85rem;
+      color: #94a3b8;
+    }
+    .legend-color {
+      width: 16px; height: 16px;
+      border-radius: 4px;
+    }
+    .info-box {
+      max-width: 700px;
+      margin: 20px auto 0;
+      background: #1e293b;
+      border: 1px solid #334155;
+      border-radius: 12px;
+      padding: 16px 20px;
+      font-size: 0.88rem;
+      color: #94a3b8;
+      line-height: 1.6;
+    }
+    .info-box strong { color: #e2e8f0; }
+    .tooltip {
+      position: fixed;
+      background: #1e293b;
+      border: 1px solid #475569;
+      border-radius: 8px;
+      padding: 10px 14px;
+      font-size: 0.82rem;
+      color: #e2e8f0;
+      pointer-events: none;
+      z-index: 100;
+      display: none;
+      max-width: 320px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .tooltip .hash-full {
+      font-family: 'Courier New', monospace;
+      font-size: 0.78rem;
+      color: #38bdf8;
+      word-break: break-all;
+      margin-top: 4px;
+    }
+    .verify-info {
+      text-align: center;
+      margin-top: 10px;
+      font-size: 0.9rem;
+      min-height: 24px;
+    }
+    .verify-info.success { color: #34d399; }
+    .verify-info.fail { color: #f87171; }
+  </style>
+</head>
+<body>
+  <h1>🌳 Merkle Tree Visualization</h1>
+  <p class="subtitle">Interactive hash tree — add data blocks and explore the structure</p>
+
+  <div class="controls">
+    <input type="text" id="dataInput" placeholder="Enter data block..." value="">
+    <button class="btn-add" onclick="addBlock()">+ Add Block</button>
+    <button class="btn-verify" onclick="verifyRandom()">🔍 Verify Proof</button>
+    <button class="btn-reset" onclick="resetTree()">↺ Reset</button>
+  </div>
+  <div class="verify-info" id="verifyInfo"></div>
+
+  <div class="tree-container" id="treeContainer"></div>
+
+  <div class="legend">
+    <div class="legend-item"><div class="legend-color" style="background:linear-gradient(135deg,#f59e0b,#f97316);"></div> Merkle Root</div>
+    <div class="legend-item"><div class="legend-color" style="background:linear-gradient(135deg,#6366f1,#818cf8);"></div> Internal Node</div>
+    <div class="legend-item"><div class="legend-color" style="background:linear-gradient(135deg,#0ea5e9,#38bdf8);"></div> Leaf Node</div>
+    <div class="legend-item"><div class="legend-color" style="background:linear-gradient(135deg,#fbbf24,#f59e0b);"></div> Verification Path</div>
+  </div>
+
+  <div class="info-box">
+    <strong>How it works:</strong> Each leaf node hashes a data block. Parent nodes hash the
+    concatenation of their children's hashes. The <strong>Merkle Root</strong> at the top uniquely
+    represents all data. Changing even one byte in any block changes the root hash.<br><br>
+    <strong>Try it:</strong> Add data blocks, hover over nodes to see full hashes, and click
+    <em>Verify Proof</em> to see a Merkle proof path highlighted in gold.
+  </div>
+
+  <div class="tooltip" id="tooltip"></div>
+
+  <script>
+    let dataBlocks = ["Alice", "Bob", "Charlie", "Dave"];
+    let tree = [];
+    let highlightedNodes = new Set();
+    let highlightedEdges = new Set();
+
+    // Simple hash function (SHA-256-like simulation for visualization)
+    async function sha256(message) {
+      const msgBuffer = new TextEncoder().encode(message);
+      const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+      const hashArray = Array.from(new Uint8Array(hashBuffer));
+      return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+    }
+
+    async function buildTree() {
+      if (dataBlocks.length === 0) { tree = []; return; }
+
+      // Build leaves
+      let leaves = [];
+      for (let d of dataBlocks) {
+        const h = await sha256(d);
+        leaves.push({ label: `H(${d})`, hash: h, data: d, isLeaf: true });
+      }
+
+      // If odd, duplicate last
+      let level = [...leaves];
+      tree = [level];
+
+      while (level.length > 1) {
+        let next = [];
+        for (let i = 0; i < level.length; i += 2) {
+          if (i + 1 < level.length) {
+            const combined = level[i].hash + level[i + 1].hash;
+            const h = await sha256(combined);
+            next.push({
+              label: level.length <= 2 ? 'Root' : `H${Math.floor(i/2)}`,
+              hash: h,
+              left: level[i],
+              right: level[i + 1],
+              isLeaf: false
+            });
+          } else {
+            // Odd node: duplicate
+            const combined = level[i].hash + level[i].hash;
+            const h = await sha256(combined);
+            next.push({
+              label: level.length <= 2 ? 'Root' : `H${Math.floor(i/2)}`,
+              hash: h,
+              left: level[i],
+              right: level[i],
+              isLeaf: false,
+              duplicated: true
+            });
+          }
+        }
+        tree.push(next);
+        level = next;
+      }
+    }
+
+    function renderTree() {
+      const container = document.getElementById('treeContainer');
+      if (tree.length === 0) {
+        container.innerHTML = '<p style="text-align:center;color:#64748b;">No data blocks. Add some!</p>';
+        return;
+      }
+
+      const levels = [...tree].reverse(); // root first
+      const nodeW = 130, nodeH = 52;
+      const hGap = 16, vGap = 60;
+      const maxLeaves = levels[levels.length - 1].length;
+      const svgW = Math.max(maxLeaves * (nodeW + hGap), 400);
+      const svgH = levels.length * (nodeH + vGap) + 40;
+
+      // Assign positions
+      let positions = new Map();
+      // Leaves first (bottom)
+      const bottomY = (levels.length - 1) * (nodeH + vGap) + 20;
+      const leafLevel = levels[levels.length - 1];
+      const totalLeafW = leafLevel.length * nodeW + (leafLevel.length - 1) * hGap;
+      const leafStartX = (svgW - totalLeafW) / 2;
+      leafLevel.forEach((node, i) => {
+        positions.set(node, {
+          x: leafStartX + i * (nodeW + hGap) + nodeW / 2,
+          y: bottomY
+        });
+      });
+
+      // Internal levels
+      for (let l = levels.length - 2; l >= 0; l--) {
+        const lvl = levels[l];
+        const y = l * (nodeH + vGap) + 20;
+        lvl.forEach((node, i) => {
+          const leftPos = positions.get(node.left);
+          const rightPos = positions.get(node.right);
+          const x = (leftPos.x + rightPos.x) / 2;
+          positions.set(node, { x, y });
+        });
+      }
+
+      let edgesHTML = '';
+      let nodesHTML = '';
+
+      // Draw edges
+      for (let l = 0; l < levels.length - 1; l++) {
+        levels[l].forEach(node => {
+          const pPos = positions.get(node);
+          [node.left, node.right].forEach(child => {
+            if (child) {
+              const cPos = positions.get(child);
+              const edgeId = node.hash.slice(0,8) + '-' + child.hash.slice(0,8);
+              const hl = highlightedEdges.has(edgeId) ? ' highlighted' : '';
+              edgesHTML += `<path class="edge${hl}" d="M${pPos.x},${pPos.y + nodeH} C${pPos.x},${pPos.y + nodeH + vGap/2} ${cPos.x},${cPos.y - vGap/2} ${cPos.x},${cPos.y}" data-edge="${edgeId}"/>`;
+            }
+          });
+        });
+      }
+
+      // Draw nodes
+      levels.forEach((lvl, l) => {
+        lvl.forEach(node => {
+          const pos = positions.get(node);
+          const isRoot = l === 0 && lvl.length === 1;
+          let fill;
+          if (isRoot) fill = 'url(#rootGrad)';
+          else if (node.isLeaf) fill = 'url(#leafGrad)';
+          else fill = 'url(#intGrad)';
+
+          const hl = highlightedNodes.has(node.hash) ? ' highlighted' : '';
+          const shortHash = node.hash.slice(0, 10) + '…';
+          const label = isRoot ? '🏛 Merkle Root' : node.label;
+
+          nodesHTML += `
+            <g class="node-group" data-hash="${node.hash}" data-label="${node.label}" data-data="${node.data || ''}"
+               onmouseenter="showTooltip(event, this)" onmouseleave="hideTooltip()">
+              <rect class="node-rect${hl}" x="${pos.x - nodeW/2}" y="${pos.y}" width="${nodeW}" height="${nodeH}"
+                    fill="${fill}" stroke="${highlightedNodes.has(node.hash) ? '#fbbf24' : '#475569'}" stroke-width="${highlightedNodes.has(node.hash) ? 2 : 1}"/>
+              <text class="node-label" x="${pos.x}" y="${pos.y + 20}">${label}</text>
+              <text class="node-hash" x="${pos.x}" y="${pos.y + 36}">${shortHash}</text>
+            </g>`;
+        });
+      });
+
+      container.innerHTML = `
+        <svg width="${svgW}" height="${svgH}" viewBox="0 0 ${svgW} ${svgH}">
+          <defs>
+            <linearGradient id="rootGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" style="stop-color:#f59e0b"/>
+              <stop offset="100%" style="stop-color:#f97316"/>
+            </linearGradient>
+            <linearGradient id="intGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" style="stop-color:#6366f1"/>
+              <stop offset="100%" style="stop-color:#818cf8"/>
+            </linearGradient>
+            <linearGradient id="leafGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+              <stop offset="0%" style="stop-color:#0ea5e9"/>
+              <stop offset="100%" style="stop-color:#38bdf8"/>
+            </linearGradient>
+          </defs>
+          ${edgesHTML}
+          ${nodesHTML}
+        </svg>`;
+    }
+
+    function showTooltip(e, el) {
+      const tip = document.getElementById('tooltip');
+      const hash = el.getAttribute('data-hash');
+      const label = el.getAttribute('data-label');
+      const data = el.getAttribute('data-data');
+      tip.innerHTML = `<strong>${label}</strong>${data ? '<br>Data: <em>' + data + '</em>' : ''}<div class="hash-full">${hash}</div>`;
+      tip.style.display = 'block';
+      tip.style.left = (e.clientX + 14) + 'px';
+      tip.style.top = (e.clientY - 10) + 'px';
+    }
+
+    function hideTooltip() {
+      document.getElementById('tooltip').style.display = 'none';
+    }
+
+    async function addBlock() {
+      const input = document.getElementById('dataInput');
+      const val = input.value.trim();
+      if (!val) return;
+      dataBlocks.push(val);
+      input.value = '';
+      highlightedNodes.clear();
+      highlightedEdges.clear();
+      document.getElementById('verifyInfo').textContent = '';
+      await buildTree();
+      renderTree();
+    }
+
+    async function resetTree() {
+      dataBlocks = ["Alice", "Bob", "Charlie", "Dave"];
+      highlightedNodes.clear();
+      highlightedEdges.clear();
+      document.getElementById('verifyInfo').textContent = '';
+      await buildTree();
+      renderTree();
+    }
+
+    async function verifyRandom() {
+      if (dataBlocks.length < 2) return;
+      highlightedNodes.clear();
+      highlightedEdges.clear();
+
+      const idx = Math.floor(Math.random() * dataBlocks.length);
+      const target = dataBlocks[idx];
+
+      // Walk up the tree highlighting the proof path
+      const levels = tree; // bottom-up
+      let currentNode = levels[0][idx];
+      highlightedNodes.add(currentNode.hash);
+
+      for (let l = 0; l < levels.length - 1; l++) {
+        // Find parent in next level
+        const parentLevel = levels[l + 1];
+        for (let p of parentLevel) {
+          if (p.left === currentNode || p.right === currentNode) {
+            // Highlight sibling
+            const sibling = p.left === currentNode ? p.right : p.left;
+            highlightedNodes.add(sibling.hash);
+            highlightedNodes.add(p.hash);
+            highlightedEdges.add(p.hash.slice(0,8) + '-' + currentNode.hash.slice(0,8));
+            highlightedEdges.add(p.hash.slice(0,8) + '-' + sibling.hash.slice(0,8));
+            currentNode = p;
+            break;
+          }
+        }
+      }
+
+      renderTree();
+      const info = document.getElementById('verifyInfo');
+      info.className = 'verify-info success';
+      info.textContent = `✅ Merkle proof path for "${target}" (index ${idx}) — highlighted in gold`;
+    }
+
+    // Init
+    document.getElementById('dataInput').addEventListener('keydown', e => {
+      if (e.key === 'Enter') addBlock();
+    });
+    buildTree().then(renderTree);
+  </script>
+</body>
+</html>

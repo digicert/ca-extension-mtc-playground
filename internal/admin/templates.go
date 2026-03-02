@@ -308,6 +308,18 @@ const vizExplorerHTML = `<!DOCTYPE html>
 		.leg{display:flex;align-items:center;gap:5px;font-size:.73rem;color:#94a3b8}
 		.leg-c{width:12px;height:12px;border-radius:3px}
 		.loading-msg{text-align:center;color:#94a3b8;padding:60px 20px;font-size:1rem}
+		.merkle-node-group{cursor:pointer}
+		.merkle-node-rect{rx:10;ry:10;transition:all .3s}
+		.merkle-node-group:hover .merkle-node-rect{filter:brightness(1.3)}
+		.merkle-node-label{font-family:system-ui,sans-serif;font-size:11px;fill:#e2e8f0;text-anchor:middle;pointer-events:none}
+		.merkle-node-hash{font-family:'Courier New',monospace;font-size:9.5px;fill:#94a3b8;text-anchor:middle;pointer-events:none}
+		.merkle-edge{stroke:#475569;stroke-width:2;fill:none}
+		.merkle-edge.highlighted{stroke:#fbbf24;stroke-width:3;filter:drop-shadow(0 0 4px rgba(251,191,36,.5))}
+		.merkle-node-rect.highlighted{filter:drop-shadow(0 0 8px rgba(251,191,36,.6))}
+		#merkleSvgContainer{scrollbar-width:thin;scrollbar-color:#334155 #0a0e1a}
+		#merkleSvgContainer::-webkit-scrollbar{width:8px;height:8px}
+		#merkleSvgContainer::-webkit-scrollbar-track{background:#0a0e1a}
+		#merkleSvgContainer::-webkit-scrollbar-thumb{background:#334155;border-radius:4px}
 		@media(max-width:768px){.main-viz{flex-direction:column;height:auto}.side{width:100%;border-left:none;border-top:1px solid #1e293b;max-height:300px}.viz{min-height:400px}}
 	</style>
 </head>
@@ -328,6 +340,7 @@ const vizExplorerHTML = `<!DOCTYPE html>
 			<div class="tab active" id="tabSunburst" onclick="switchView('sunburst')">Sunburst</div>
 			<div class="tab" id="tabTreemap" onclick="switchView('treemap')">Treemap</div>
 			<div class="tab" id="tabProof" onclick="switchView('proof')">Proof Explorer</div>
+			<div class="tab" id="tabMerkle" onclick="switchView('merkle')">Merkle Tree</div>
 		</div>
 		<div class="controls" id="vizControls">
 			<button class="btn-g" onclick="drillUp()">Drill Up</button>
@@ -346,12 +359,26 @@ const vizExplorerHTML = `<!DOCTYPE html>
 			<button class="btn-g" onclick="loadProof()">Show Proof</button>
 			<span id="proofStatus" style="color:#64748b;font-size:.8rem;align-self:center"></span>
 		</div>
+		<div class="controls" id="merkleControls" style="display:none">
+			<button onclick="merklePrev()">← Prev</button>
+			<button onclick="merkleNext()">Next →</button>
+			<input type="number" id="merkleStartInput" placeholder="Jump to index..." min="0" style="padding:6px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:.85rem;width:160px" onkeydown="if(event.key==='Enter')merkleJump()">
+			<button class="btn-g" onclick="merkleJump()">Go</button>
+			<select id="merkleSize" onchange="merkleSizeChanged()" style="padding:6px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:.8rem">
+				<option value="4">4 Leaves</option>
+				<option value="8" selected>8 Leaves</option>
+				<option value="16">16 Leaves</option>
+			</select>
+			<button onclick="verifyMerkleRandom()" style="background:linear-gradient(135deg,#34d399,#22d3ee);color:#0a0e1a;border:none;font-weight:600">Verify Proof</button>
+			<span id="merkleStatus" style="color:#64748b;font-size:.8rem;align-self:center"></span>
+		</div>
 		<div class="stats" id="statsBar"></div>
 		<div class="breadcrumb" id="breadcrumb"></div>
 		<div class="legend-row" id="legendRow"></div>
 		<div class="main-viz">
 			<div class="viz" id="vizPanel">
 				<canvas id="canvas"></canvas>
+				<div id="merkleSvgContainer" style="display:none;width:100%;height:100%;overflow:auto;padding:20px 10px"></div>
 				<div class="loading-msg" id="loadingMsg">Loading visualization data...</div>
 			</div>
 			<div class="side">
@@ -376,6 +403,13 @@ const vizExplorerHTML = `<!DOCTYPE html>
 	let highlightRevoked = false;
 	let proofData = null;
 	let proofSegments = [];
+
+	// ─── MERKLE TREE STATE ───
+	let merkleSubtreeData = null;
+	let merkleHighlightedNodes = new Set();
+	let merkleHighlightedEdges = new Set();
+	let merkleSubtreeStart = 0;
+	let merkleSubtreeSize = 8;
 
 	const canvas = document.getElementById('canvas');
 	const ctx = canvas.getContext('2d');
@@ -784,6 +818,11 @@ const vizExplorerHTML = `<!DOCTYPE html>
 	}
 
 	function redraw() {
+		if (viewMode === 'merkle') {
+			renderMerkleTree();
+			renderMerkleLegend();
+			return;
+		}
 		resizeCanvas();
 		ctx.clearRect(0, 0, canvas.width, canvas.height);
 		if (viewMode === 'proof') {
@@ -1034,23 +1073,300 @@ const vizExplorerHTML = `<!DOCTYPE html>
 	});
 	canvas.addEventListener('mouseleave', () => { document.getElementById('tip').style.display = 'none'; });
 
+	// ─── MERKLE TREE ───
+	async function loadMerkleSubtree() {
+		document.getElementById('merkleStatus').textContent = 'Loading...';
+		try {
+			const res = await fetch('/admin/viz/subtree?start=' + merkleSubtreeStart + '&size=' + merkleSubtreeSize);
+			if (!res.ok) { document.getElementById('merkleStatus').textContent = 'Failed to load subtree'; return; }
+			merkleSubtreeData = await res.json();
+			merkleSubtreeStart = merkleSubtreeData.subtreeStart;
+			merkleHighlightedNodes.clear();
+			merkleHighlightedEdges.clear();
+			renderMerkleTree();
+			renderMerkleSidePanel();
+			updateMerkleStatus();
+		} catch (err) {
+			document.getElementById('merkleStatus').textContent = 'Error: ' + err.message;
+		}
+	}
+
+	function updateMerkleStatus() {
+		if (!merkleSubtreeData) return;
+		const d = merkleSubtreeData;
+		const end = Math.min(d.subtreeStart + d.subtreeSize, d.treeSize);
+		document.getElementById('merkleStatus').style.color = '#94a3b8';
+		document.getElementById('merkleStatus').textContent = 'Entries ' + d.subtreeStart + '\u2013' + (end - 1) + ' of ' + d.treeSize.toLocaleString();
+	}
+
+	function renderMerkleTree() {
+		const container = document.getElementById('merkleSvgContainer');
+		if (!merkleSubtreeData || merkleSubtreeData.levels.length === 0) {
+			container.innerHTML = '<p style="text-align:center;color:#64748b;padding:60px 20px">No entries in the log. Loading...</p>';
+			return;
+		}
+		// levels[0] = leaves, levels[last] = subtree root; reverse for top-down rendering
+		const dataLevels = merkleSubtreeData.levels;
+		const levels = [...dataLevels].reverse();
+		const nodeW = 130, nodeH = 52;
+		const hGap = 16, vGap = 60;
+		const maxLeaves = levels[levels.length - 1].nodes.length;
+		const svgW = Math.max(maxLeaves * (nodeW + hGap), 400);
+		const svgH = levels.length * (nodeH + vGap) + 40;
+
+		// Position leaves at bottom
+		let positions = [];
+		for (let l = 0; l < levels.length; l++) positions.push([]);
+
+		const bottomIdx = levels.length - 1;
+		const leafNodes = levels[bottomIdx].nodes;
+		const totalLeafW = leafNodes.length * nodeW + (leafNodes.length - 1) * hGap;
+		const leafStartX = (svgW - totalLeafW) / 2;
+		leafNodes.forEach((node, i) => {
+			positions[bottomIdx][i] = { x: leafStartX + i * (nodeW + hGap) + nodeW / 2, y: bottomIdx * (nodeH + vGap) + 20 };
+		});
+
+		// Position interior nodes by centering over children
+		for (let l = levels.length - 2; l >= 0; l--) {
+			const childPositions = positions[l + 1];
+			levels[l].nodes.forEach((node, i) => {
+				const leftIdx = i * 2;
+				const rightIdx = i * 2 + 1;
+				const leftPos = childPositions[leftIdx];
+				const rightPos = childPositions[rightIdx] || leftPos;
+				positions[l][i] = { x: (leftPos.x + rightPos.x) / 2, y: l * (nodeH + vGap) + 20 };
+			});
+		}
+
+		let edgesHTML = '';
+		let nodesHTML = '';
+
+		// Edges: parent to children
+		for (let l = 0; l < levels.length - 1; l++) {
+			const childLevel = levels[l + 1];
+			levels[l].nodes.forEach((node, i) => {
+				const pPos = positions[l][i];
+				const leftIdx = i * 2;
+				const rightIdx = i * 2 + 1;
+				[leftIdx, rightIdx].forEach(ci => {
+					if (ci < childLevel.nodes.length) {
+						const cPos = positions[l + 1][ci];
+						const edgeId = node.hash.slice(0, 8) + '-' + childLevel.nodes[ci].hash.slice(0, 8);
+						const hl = merkleHighlightedEdges.has(edgeId) ? ' highlighted' : '';
+						edgesHTML += '<path class="merkle-edge' + hl + '" d="M' + pPos.x + ',' + (pPos.y + nodeH) + ' C' + pPos.x + ',' + (pPos.y + nodeH + vGap / 2) + ' ' + cPos.x + ',' + (cPos.y - vGap / 2) + ' ' + cPos.x + ',' + cPos.y + '"/>';
+					}
+				});
+			});
+		}
+
+		// Nodes
+		levels.forEach((lvl, l) => {
+			const isLeafLevel = l === levels.length - 1;
+			const isRootLevel = l === 0 && lvl.nodes.length === 1;
+			lvl.nodes.forEach((node, i) => {
+				const pos = positions[l][i];
+				let fill;
+				if (isRootLevel) fill = 'url(#merkleRootGrad)';
+				else if (isLeafLevel) fill = 'url(#merkleLeafGrad)';
+				else fill = 'url(#merkleIntGrad)';
+				const hl = merkleHighlightedNodes.has(node.hash) ? ' highlighted' : '';
+				const shortHash = node.hash.slice(0, 10) + '...';
+				let label;
+				if (isRootLevel) label = 'Subtree Root';
+				else if (isLeafLevel) {
+					const cn = node.commonName || '';
+					label = cn.length > 14 ? cn.slice(0, 13) + '...' : (cn || '#' + node.index);
+				} else {
+					label = 'L' + lvl.level + ' #' + node.index;
+				}
+				const extra = node.commonName ? ' data-cn="' + node.commonName + '" data-ca="' + (node.ca || '') + '" data-algo="' + (node.algorithm || '') + '" data-revoked="' + (node.revoked || false) + '"' : '';
+				nodesHTML += '<g class="merkle-node-group" data-hash="' + node.hash + '" data-label="' + label + '" data-index="' + node.index + '" data-level="' + lvl.level + '"' + extra + ' onmouseenter="showMerkleTooltip(event,this)" onmouseleave="hideMerkleTooltip()">' +
+					'<rect class="merkle-node-rect' + hl + '" x="' + (pos.x - nodeW / 2) + '" y="' + pos.y + '" width="' + nodeW + '" height="' + nodeH + '" fill="' + fill + '" stroke="' + (merkleHighlightedNodes.has(node.hash) ? '#fbbf24' : (node.revoked ? '#f87171' : '#475569')) + '" stroke-width="' + (merkleHighlightedNodes.has(node.hash) ? 2 : 1) + '"/>' +
+					'<text class="merkle-node-label" x="' + pos.x + '" y="' + (pos.y + 20) + '">' + label + '</text>' +
+					'<text class="merkle-node-hash" x="' + pos.x + '" y="' + (pos.y + 36) + '">' + shortHash + '</text></g>';
+			});
+		});
+
+		container.innerHTML = '<svg width="' + svgW + '" height="' + svgH + '" viewBox="0 0 ' + svgW + ' ' + svgH + '">' +
+			'<defs>' +
+			'<linearGradient id="merkleRootGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#f59e0b"/><stop offset="100%" style="stop-color:#f97316"/></linearGradient>' +
+			'<linearGradient id="merkleIntGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#6366f1"/><stop offset="100%" style="stop-color:#818cf8"/></linearGradient>' +
+			'<linearGradient id="merkleLeafGrad" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" style="stop-color:#0ea5e9"/><stop offset="100%" style="stop-color:#38bdf8"/></linearGradient>' +
+			'</defs>' + edgesHTML + nodesHTML + '</svg>';
+	}
+
+	function showMerkleTooltip(e, el) {
+		const tip = document.getElementById('tip');
+		const hash = el.getAttribute('data-hash');
+		const label = el.getAttribute('data-label');
+		const idx = el.getAttribute('data-index');
+		const level = el.getAttribute('data-level');
+		const cn = el.getAttribute('data-cn');
+		const ca = el.getAttribute('data-ca');
+		const algo = el.getAttribute('data-algo');
+		const revoked = el.getAttribute('data-revoked') === 'true';
+		let html = '<strong>' + label + '</strong>';
+		if (cn) {
+			html += '<br>CN: ' + cn;
+			if (ca) html += '<br>CA: ' + ca;
+			if (algo) html += '<br>Algorithm: ' + algo;
+			if (revoked) html += '<br><span style="color:#f87171;font-weight:600">REVOKED</span>';
+		}
+		html += '<br><span style="color:#64748b;font-size:.72rem">Level ' + level + ', Index ' + idx + '</span>';
+		html += '<div style="font-family:monospace;font-size:.75rem;color:#38bdf8;word-break:break-all;margin-top:4px">' + hash + '</div>';
+		tip.innerHTML = html;
+		tip.style.display = 'block';
+		tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 380) + 'px';
+		tip.style.top = (e.clientY - 10) + 'px';
+	}
+	function hideMerkleTooltip() { document.getElementById('tip').style.display = 'none'; }
+
+	function merklePrev() {
+		if (merkleSubtreeStart <= 0) return;
+		merkleSubtreeStart = Math.max(0, merkleSubtreeStart - merkleSubtreeSize);
+		loadMerkleSubtree();
+	}
+	function merkleNext() {
+		if (!merkleSubtreeData) return;
+		if (merkleSubtreeStart + merkleSubtreeSize < merkleSubtreeData.treeSize) {
+			merkleSubtreeStart += merkleSubtreeSize;
+			loadMerkleSubtree();
+		}
+	}
+	function merkleJump() {
+		const idx = parseInt(document.getElementById('merkleStartInput').value, 10);
+		if (!isNaN(idx) && idx >= 0) {
+			merkleSubtreeStart = idx;
+			loadMerkleSubtree();
+		}
+	}
+	function merkleSizeChanged() {
+		merkleSubtreeSize = parseInt(document.getElementById('merkleSize').value, 10);
+		loadMerkleSubtree();
+	}
+
+	function verifyMerkleRandom() {
+		if (!merkleSubtreeData || merkleSubtreeData.levels.length === 0) return;
+		const leaves = merkleSubtreeData.levels[0].nodes;
+		if (leaves.length < 2) return;
+		merkleHighlightedNodes.clear();
+		merkleHighlightedEdges.clear();
+		const leafIdx = Math.floor(Math.random() * leaves.length);
+		const leaf = leaves[leafIdx];
+		merkleHighlightedNodes.add(leaf.hash);
+		// Walk up levels highlighting proof path
+		let curIdx = leafIdx;
+		for (let l = 0; l < merkleSubtreeData.levels.length - 1; l++) {
+			const sibIdx = curIdx ^ 1;
+			const parentIdx = curIdx >> 1;
+			const curLevel = merkleSubtreeData.levels[l];
+			const parentLevel = merkleSubtreeData.levels[l + 1];
+			if (sibIdx < curLevel.nodes.length) {
+				merkleHighlightedNodes.add(curLevel.nodes[sibIdx].hash);
+				if (parentIdx < parentLevel.nodes.length) {
+					merkleHighlightedEdges.add(parentLevel.nodes[parentIdx].hash.slice(0, 8) + '-' + curLevel.nodes[sibIdx].hash.slice(0, 8));
+				}
+			}
+			if (parentIdx < parentLevel.nodes.length) {
+				merkleHighlightedNodes.add(parentLevel.nodes[parentIdx].hash);
+				merkleHighlightedEdges.add(parentLevel.nodes[parentIdx].hash.slice(0, 8) + '-' + curLevel.nodes[curIdx].hash.slice(0, 8));
+			}
+			curIdx = parentIdx;
+		}
+		renderMerkleTree();
+		const label = leaf.commonName || ('Entry #' + leaf.index);
+		const status = document.getElementById('merkleStatus');
+		status.style.color = '#34d399';
+		status.textContent = 'Proof path for "' + label + '" (index ' + leaf.index + ') highlighted in gold';
+	}
+
+	function renderMerkleLegend() {
+		const items = [
+			{c:'linear-gradient(135deg,#f59e0b,#f97316)',l:'Subtree Root'},
+			{c:'linear-gradient(135deg,#6366f1,#818cf8)',l:'Internal Node'},
+			{c:'linear-gradient(135deg,#0ea5e9,#38bdf8)',l:'Leaf Node'},
+			{c:'linear-gradient(135deg,#fbbf24,#f59e0b)',l:'Verification Path'},
+		];
+		document.getElementById('legendRow').innerHTML = items.map(i =>
+			'<div class="leg"><div class="leg-c" style="background:' + i.c + '"></div>' + i.l + '</div>'
+		).join('');
+	}
+
+	function renderMerkleSidePanel() {
+		const title = document.getElementById('sideTitle');
+		const content = document.getElementById('sideContent');
+		title.textContent = 'Merkle Tree';
+		if (!merkleSubtreeData || merkleSubtreeData.levels.length === 0) {
+			content.innerHTML = '<div style="color:#64748b;padding:20px;text-align:center">Loading tree data...</div>';
+			return;
+		}
+		const d = merkleSubtreeData;
+		const leaves = d.levels[0].nodes;
+		const subtreeRoot = d.levels[d.levels.length - 1].nodes[0];
+		const totalNodes = d.levels.reduce((s, l) => s + l.nodes.length, 0);
+		const end = Math.min(d.subtreeStart + d.subtreeSize, d.treeSize);
+
+		let html = '<div class="detail-card" style="border-left-color:#f59e0b">' +
+			'<div class="domain">Tree Overview</div>' +
+			'<div class="meta">Total Entries: ' + d.treeSize.toLocaleString() + '<br>Viewing: ' + d.subtreeStart + ' \u2013 ' + (end - 1) +
+			'<br>Subtree Nodes: ' + totalNodes + '<br>Depth: ' + d.levels.length + '</div></div>';
+
+		html += '<div class="detail-card" style="border-left-color:#f97316">' +
+			'<div style="font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Global Root Hash</div>' +
+			'<div style="font-family:monospace;font-size:.72rem;color:#f59e0b;word-break:break-all">' + d.globalRootHash + '</div></div>';
+
+		if (subtreeRoot) {
+			html += '<div class="detail-card" style="border-left-color:#818cf8">' +
+				'<div style="font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Subtree Root Hash</div>' +
+				'<div style="font-family:monospace;font-size:.72rem;color:#818cf8;word-break:break-all">' + subtreeRoot.hash + '</div></div>';
+		}
+
+		html += '<div style="margin:10px 0 6px;font-size:.78rem;color:#94a3b8;font-weight:600">Leaf Entries (' + leaves.length + ')</div>';
+		leaves.forEach(leaf => {
+			const label = leaf.commonName || ('Entry #' + leaf.index);
+			const revTag = leaf.revoked ? '<span class="tag revoked">Revoked</span>' : '<span class="tag valid">Valid</span>';
+			const pqTag = leaf.isPQ ? ' <span class="tag pq">PQ</span>' : '';
+			html += '<div class="detail-card' + (leaf.revoked ? ' rev' : '') + '" style="padding:8px 12px">' +
+				'<div style="display:flex;justify-content:space-between;align-items:center">' +
+				'<span class="domain" style="font-size:.82rem">' + label + '</span>' +
+				'<span style="color:#64748b;font-size:.7rem">#' + leaf.index + '</span></div>' +
+				(leaf.ca ? '<div class="meta">' + leaf.ca + (leaf.algorithm ? ' \u00b7 ' + leaf.algorithm : '') + '</div>' : '') +
+				'<div style="margin-top:3px">' + revTag + pqTag + '</div>' +
+				'<div style="font-family:monospace;font-size:.68rem;color:#38bdf8;word-break:break-all;margin-top:2px">' + leaf.hash + '</div></div>';
+		});
+
+		html += '<div class="detail-card" style="border-left-color:#818cf8;margin-top:12px">' +
+			'<div class="domain">How It Works</div>' +
+			'<div class="meta">Each leaf hashes a log entry with SHA-256. Parent nodes hash the concatenation of their children. ' +
+			'This subtree shows ' + d.subtreeSize + ' consecutive entries from the transparency log. ' +
+			'Use Prev/Next to navigate, or click "Verify Proof" to see an inclusion proof path.</div></div>';
+		content.innerHTML = html;
+	}
+
 	// ─── ACTIONS ───
 	function switchView(v) {
 		viewMode = v;
 		document.getElementById('tabSunburst').classList.toggle('active', v === 'sunburst');
 		document.getElementById('tabTreemap').classList.toggle('active', v === 'treemap');
 		document.getElementById('tabProof').classList.toggle('active', v === 'proof');
-		// Show/hide proof search controls
-		const proofControls = document.getElementById('proofControls');
-		const vizControls = document.getElementById('vizControls');
-		if (v === 'proof') {
-			proofControls.style.display = 'flex';
-			vizControls.style.display = 'none';
+		document.getElementById('tabMerkle').classList.toggle('active', v === 'merkle');
+		// Show/hide controls per view
+		document.getElementById('proofControls').style.display = v === 'proof' ? 'flex' : 'none';
+		document.getElementById('merkleControls').style.display = v === 'merkle' ? 'flex' : 'none';
+		document.getElementById('vizControls').style.display = (v === 'sunburst' || v === 'treemap') ? '' : 'none';
+		// Toggle canvas vs SVG container
+		canvas.style.display = v === 'merkle' ? 'none' : 'block';
+		document.getElementById('merkleSvgContainer').style.display = v === 'merkle' ? 'block' : 'none';
+		// Hide stats/breadcrumb for merkle view
+		document.getElementById('statsBar').style.display = v === 'merkle' ? 'none' : '';
+		document.getElementById('breadcrumb').style.display = v === 'merkle' ? 'none' : '';
+		if (v === 'merkle') {
+			renderMerkleLegend();
+			if (!merkleSubtreeData) { loadMerkleSubtree(); }
+			else { renderMerkleTree(); renderMerkleSidePanel(); updateMerkleStatus(); }
 		} else {
-			proofControls.style.display = 'none';
-			vizControls.style.display = '';
+			redraw();
 		}
-		redraw();
 	}
 	function drillUp() {
 		if (drillPath.length > 1) {
@@ -1317,7 +1633,7 @@ const vizExplorerHTML = `<!DOCTYPE html>
 
 	// Keyboard shortcuts
 	document.addEventListener('keydown', e => {
-		if (e.key === 'Escape') { if (viewMode === 'proof') return; drillUp(); }
+		if (e.key === 'Escape') { if (viewMode === 'proof' || viewMode === 'merkle') return; drillUp(); }
 		if (e.key === 'Backspace' && !e.target.matches('input,textarea')) { e.preventDefault(); resetView(); }
 	});
 
@@ -1328,7 +1644,7 @@ const vizExplorerHTML = `<!DOCTYPE html>
 		const params = new URLSearchParams(window.location.search);
 		const tab = params.get('tab');
 		const index = params.get('index');
-		if (tab && ['sunburst', 'treemap', 'proof'].includes(tab)) {
+		if (tab && ['sunburst', 'treemap', 'proof', 'merkle'].includes(tab)) {
 			switchView(tab);
 		}
 		if (index !== null && index !== '') {

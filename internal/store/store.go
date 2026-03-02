@@ -427,6 +427,45 @@ func (s *Store) GetTileHashes(ctx context.Context, level int, nodeStart int64, c
 	return hashes[:found], nil
 }
 
+// SubtreeLeafInfo holds cert metadata for a single leaf entry in a subtree view.
+type SubtreeLeafInfo struct {
+	EntryIdx     int64  `json:"entryIdx"`
+	CommonName   string `json:"commonName"`
+	CAName       string `json:"ca"`
+	KeyAlgorithm string `json:"algorithm"`
+	IsPQ         bool   `json:"isPQ"`
+	Revoked      bool   `json:"revoked"`
+}
+
+// GetSubtreeLeafInfo fetches cert metadata and revocation status for entries in [startIdx, endIdx).
+func (s *Store) GetSubtreeLeafInfo(ctx context.Context, startIdx, endIdx int64) ([]SubtreeLeafInfo, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT cm.entry_idx, cm.common_name, cm.ca_name, cm.key_algorithm, cm.is_pq,
+		        CASE WHEN ri.entry_idx IS NOT NULL THEN TRUE ELSE FALSE END AS revoked
+		 FROM cert_metadata cm
+		 LEFT JOIN revoked_indices ri ON cm.entry_idx = ri.entry_idx
+		 WHERE cm.entry_idx >= $1 AND cm.entry_idx < $2
+		 ORDER BY cm.entry_idx`,
+		startIdx, endIdx)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetSubtreeLeafInfo: %w", err)
+	}
+	defer rows.Close()
+
+	var results []SubtreeLeafInfo
+	for rows.Next() {
+		var info SubtreeLeafInfo
+		if err := rows.Scan(&info.EntryIdx, &info.CommonName, &info.CAName, &info.KeyAlgorithm, &info.IsPQ, &info.Revoked); err != nil {
+			return nil, fmt.Errorf("store.GetSubtreeLeafInfo: scan: %w", err)
+		}
+		results = append(results, info)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store.GetSubtreeLeafInfo: rows: %w", err)
+	}
+	return results, nil
+}
+
 // --- Checkpoints ---
 
 // Checkpoint is a signed checkpoint record.

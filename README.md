@@ -1,4 +1,4 @@
-# mtc-bridge
+# MTC Playground (mtc-bridge)
 
 A standalone Go service implementing
 [Merkle Tree Certificates (MTC)](https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-01.html)
