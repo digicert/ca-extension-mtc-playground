@@ -57,6 +57,8 @@ func New(s *store.Store, revMgr *revocation.Manager, logOrigin string, logger *s
 	h.mux.HandleFunc("GET /assertion/{query}/pem", h.handleAssertionPEM)
 	h.mux.HandleFunc("GET /assertions/pending", h.handleAssertionsPending)
 	h.mux.HandleFunc("GET /assertions/stats", h.handleAssertionsStats)
+	h.mux.HandleFunc("GET /landmarks", h.handleLandmarks)
+	h.mux.HandleFunc("GET /landmark/{tree_size}", h.handleLandmarkByTreeSize)
 	return h
 }
 
@@ -473,6 +475,85 @@ func (h *Handler) handleAssertionsStats(w http.ResponseWriter, r *http.Request) 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")
 	json.NewEncoder(w).Encode(stats)
+}
+
+// handleLandmarks returns the list of known landmarks as JSON.
+func (h *Handler) handleLandmarks(w http.ResponseWriter, r *http.Request) {
+	landmarks, err := h.store.ListLandmarks(r.Context())
+	if err != nil {
+		h.logger.Error("list landmarks", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	type landmarkJSON struct {
+		TreeSize     int64  `json:"tree_size"`
+		RootHash     string `json:"root_hash"`
+		CheckpointID int64  `json:"checkpoint_id"`
+		CreatedAt    string `json:"created_at"`
+	}
+
+	result := make([]landmarkJSON, len(landmarks))
+	for i, lm := range landmarks {
+		result[i] = landmarkJSON{
+			TreeSize:     lm.TreeSize,
+			RootHash:     hex.EncodeToString(lm.RootHash),
+			CheckpointID: lm.CheckpointID,
+			CreatedAt:    lm.CreatedAt.Format(time.RFC3339),
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleLandmarkByTreeSize returns a specific landmark by tree size.
+func (h *Handler) handleLandmarkByTreeSize(w http.ResponseWriter, r *http.Request) {
+	treeSizeStr := r.PathValue("tree_size")
+	treeSize, err := strconv.ParseInt(treeSizeStr, 10, 64)
+	if err != nil {
+		http.Error(w, "invalid tree_size", http.StatusBadRequest)
+		return
+	}
+
+	lm, err := h.store.GetLandmark(r.Context(), treeSize)
+	if err != nil {
+		http.Error(w, "landmark not found", http.StatusNotFound)
+		return
+	}
+
+	// Fetch associated subtree signatures.
+	sigs, err := h.store.GetSubtreeSignatures(r.Context(), 0, treeSize)
+	if err != nil {
+		h.logger.Warn("landmark subtree signatures", "tree_size", treeSize, "error", err)
+		sigs = nil
+	}
+
+	type sigJSON struct {
+		CosignerID int    `json:"cosigner_id"`
+		Algorithm  int    `json:"algorithm"`
+		Signature  string `json:"signature"`
+	}
+	sigResults := make([]sigJSON, len(sigs))
+	for i, s := range sigs {
+		sigResults[i] = sigJSON{
+			CosignerID: int(s.CosignerID),
+			Algorithm:  int(s.Algorithm),
+			Signature:  hex.EncodeToString(s.Signature),
+		}
+	}
+
+	result := map[string]interface{}{
+		"tree_size":     lm.TreeSize,
+		"root_hash":     hex.EncodeToString(lm.RootHash),
+		"checkpoint_id": lm.CheckpointID,
+		"created_at":    lm.CreatedAt.Format(time.RFC3339),
+		"signatures":    sigResults,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
 }
 
 // decodeTileIndex decodes a C2SP tile index path.

@@ -28,6 +28,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/briantrzupek/ca-extension-merkle/internal/mtccert"
+	"github.com/briantrzupek/ca-extension-merkle/internal/mtcformat"
 )
 
 const hashSize = 32
@@ -85,6 +88,9 @@ func main() {
 		{"acme_new_order", c.testACMENewOrder},
 		{"acme_order_flow", c.testACMEOrderFlow},
 		{"acme_full_mtc_flow", c.testACMEFullMTCFlow},
+		{"mtc_cert_format", c.testMTCCertFormat},
+		{"mtc_proof_roundtrip", c.testMTCProofRoundtrip},
+		{"mtc_log_entry_reconstruct", c.testMTCLogEntryReconstruct},
 	}
 
 	for _, tt := range tests {
@@ -1382,6 +1388,183 @@ func (c *conformanceClient) testACMEFullMTCFlow() error {
 			}
 		}
 		fmt.Printf("    FULL MTC FLOW COMPLETE: cert issued via DigiCert CA → logged in Merkle tree → assertion bundle attached\n")
+	}
+
+	return nil
+}
+
+// --- MTC Spec Conformance Tests (standalone, no server required) ---
+
+func (c *conformanceClient) testMTCCertFormat() error {
+	// Build an MTC certificate and verify its structure.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: "mtc-conformance.example.com", Country: []string{"US"}},
+		DNSNames: []string{"mtc-conformance.example.com"},
+	}, key)
+	if err != nil {
+		return fmt.Errorf("create CSR: %w", err)
+	}
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return fmt.Errorf("parse CSR: %w", err)
+	}
+
+	h := sha256.Sum256([]byte("test sibling"))
+	proof := &mtcformat.MTCProof{
+		Start:          0,
+		End:            128,
+		InclusionProof: [][]byte{h[:]},
+	}
+
+	issuer := pkix.Name{CommonName: "Conformance CA", Country: []string{"US"}}
+	notBefore := time.Now().UTC().Truncate(time.Second)
+	notAfter := notBefore.Add(365 * 24 * time.Hour)
+
+	certDER, err := mtccert.BuildMTCCertFromCSR(csr, issuer, notBefore, notAfter,
+		[]string{"mtc-conformance.example.com"}, 42, proof)
+	if err != nil {
+		return fmt.Errorf("BuildMTCCertFromCSR: %w", err)
+	}
+
+	// Verify it's detected as MTC format.
+	if !mtccert.IsMTCCertificate(certDER) {
+		return fmt.Errorf("IsMTCCertificate returned false")
+	}
+
+	// Parse it back.
+	parsed, err := mtccert.ParseMTCCertificate(certDER)
+	if err != nil {
+		return fmt.Errorf("ParseMTCCertificate: %w", err)
+	}
+	if parsed.SerialNumber != 42 {
+		return fmt.Errorf("serial = %d, want 42", parsed.SerialNumber)
+	}
+	if parsed.Proof == nil {
+		return fmt.Errorf("proof is nil after parse")
+	}
+	if parsed.Proof.End != 128 {
+		return fmt.Errorf("proof.End = %d, want 128", parsed.Proof.End)
+	}
+
+	return nil
+}
+
+func (c *conformanceClient) testMTCProofRoundtrip() error {
+	// Test MTCProof marshal/unmarshal roundtrip.
+	h1 := sha256.Sum256([]byte("hash1"))
+	h2 := sha256.Sum256([]byte("hash2"))
+	sig := make([]byte, 64)
+	for i := range sig {
+		sig[i] = byte(i)
+	}
+
+	original := &mtcformat.MTCProof{
+		Start: 100,
+		End:   200,
+		InclusionProof: [][]byte{
+			h1[:],
+			h2[:],
+		},
+		Signatures: []mtcformat.MTCSignature{
+			{CosignerID: 0, Signature: sig},
+			{CosignerID: 1, Signature: sig},
+		},
+	}
+
+	data, err := mtcformat.MarshalProof(original)
+	if err != nil {
+		return fmt.Errorf("MarshalProof: %w", err)
+	}
+
+	parsed, err := mtcformat.UnmarshalProof(data)
+	if err != nil {
+		return fmt.Errorf("UnmarshalProof: %w", err)
+	}
+
+	if parsed.Start != original.Start {
+		return fmt.Errorf("Start = %d, want %d", parsed.Start, original.Start)
+	}
+	if parsed.End != original.End {
+		return fmt.Errorf("End = %d, want %d", parsed.End, original.End)
+	}
+	if len(parsed.InclusionProof) != 2 {
+		return fmt.Errorf("InclusionProof len = %d, want 2", len(parsed.InclusionProof))
+	}
+	if len(parsed.Signatures) != 2 {
+		return fmt.Errorf("Signatures len = %d, want 2", len(parsed.Signatures))
+	}
+	if parsed.Signatures[0].CosignerID != 0 || parsed.Signatures[1].CosignerID != 1 {
+		return fmt.Errorf("cosigner IDs mismatch")
+	}
+
+	return nil
+}
+
+func (c *conformanceClient) testMTCLogEntryReconstruct() error {
+	// Build an MTC cert, parse it, reconstruct the log entry, and verify SPKI hash.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: "reconstruct.example.com", Country: []string{"US"}},
+		DNSNames: []string{"reconstruct.example.com"},
+	}, key)
+	if err != nil {
+		return fmt.Errorf("create CSR: %w", err)
+	}
+	csr, err := x509.ParseCertificateRequest(csrDER)
+	if err != nil {
+		return fmt.Errorf("parse CSR: %w", err)
+	}
+
+	h := sha256.Sum256([]byte("sibling"))
+	proof := &mtcformat.MTCProof{
+		Start:          0,
+		End:            64,
+		InclusionProof: [][]byte{h[:]},
+	}
+
+	issuer := pkix.Name{CommonName: "Reconstruct CA", Country: []string{"US"}}
+	notBefore := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+	notAfter := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
+
+	certDER, err := mtccert.BuildMTCCertFromCSR(csr, issuer, notBefore, notAfter,
+		[]string{"reconstruct.example.com"}, 10, proof)
+	if err != nil {
+		return fmt.Errorf("BuildMTCCertFromCSR: %w", err)
+	}
+
+	parsed, err := mtccert.ParseMTCCertificate(certDER)
+	if err != nil {
+		return fmt.Errorf("ParseMTCCertificate: %w", err)
+	}
+
+	// Reconstruct the log entry from the parsed cert.
+	logEntryDER, err := mtccert.ReconstructLogEntry(
+		parsed.RawIssuer, parsed.RawSubject,
+		parsed.NotBefore, parsed.NotAfter,
+		parsed.SubjectPubKeyInfo, parsed.Extensions,
+	)
+	if err != nil {
+		return fmt.Errorf("ReconstructLogEntry: %w", err)
+	}
+
+	// Verify the log entry contains the correct SPKI hash.
+	var logEntry mtcformat.TBSCertificateLogEntry
+	if _, err := asn1.Unmarshal(logEntryDER, &logEntry); err != nil {
+		return fmt.Errorf("unmarshal log entry: %w", err)
+	}
+
+	expectedHash := sha256.Sum256(csr.RawSubjectPublicKeyInfo)
+	for i := range expectedHash {
+		if logEntry.SubjectPublicKeyInfoHash[i] != expectedHash[i] {
+			return fmt.Errorf("SPKI hash mismatch at byte %d", i)
+		}
 	}
 
 	return nil

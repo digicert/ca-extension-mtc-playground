@@ -163,13 +163,42 @@ See [phase4-tls-stapling.md](phase4-tls-stapling.md) for full details.
 
 ---
 
+## Phase 5 — Embedded MTC Inclusion Proofs in X.509 Certificates (COMPLETE)
+
+**Goal:** Embed Merkle inclusion proofs directly into X.509 certificates as a custom extension, solving the "chicken-and-egg" problem where the proof needs to be in the certificate but the certificate must exist to compute its hash.
+
+**Delivered:**
+- `internal/localca` — Local intermediate CA package (3 files, ~450 lines)
+  - `extension.go` — OID `1.3.6.1.4.1.99999.1.1`, ASN.1 marshal/unmarshal, embedded proof verification
+  - `canonical.go` — TBSCertificate DER extraction, MTC extension stripping
+  - `localca.go` — ECDSA P-256 CA: `IssuePrecert`, `IssueWithProof`, `GenerateCA`
+  - `localca_test.go` — 10 tests (ASN.1 round-trip, canonical reconstruction, full Merkle verification)
+- `internal/issuancelog` — `EntryTypePrecert=2`, `BuildPrecertEntry`, `AppendDirectEntry`
+- `internal/acme/finalize.go` — `processFinalizeLocalCA` two-phase signing flow
+- `internal/config` — `LocalCAConfig` struct
+- `internal/store` — `final_cert_der` + `ca_cert_der` columns, getter/setter methods
+- `cmd/mtc-verify-cert` — Standalone offline verification CLI
+- `demo-embedded-proof.sh` — Automated demo script
+- `-generate-local-ca` flag on `mtc-bridge` binary + Makefile target
+
+**Approach:** Two-phase signing following CT pre-certificate pattern (RFC 6962):
+1. Issue pre-cert (no MTC extension) → hash canonical TBSCertificate into tree
+2. Create immediate checkpoint → compute inclusion proof
+3. Re-sign with identical template + MTC extension → final certificate
+4. Verifiers strip extension → reconstruct canonical form → verify proof offline
+
+**Status:** Committed on `main`.
+
+---
+
 ## Timeline & Dependencies
 
 ```
-Phase 1 (DONE) ──► Phase 2 (DONE) ──► Phase 3 (DONE) ──► Phase 4 (DONE)
+Phase 1 (DONE) ──► Phase 2 (DONE) ──► Phase 3 (DONE) ──► Phase 4 (DONE) ──► Phase 5 (DONE)
 ```
 
 - Phase 2 depends on Phase 1's assertion package and store methods
 - Phase 3 depends on Phase 2's polling endpoint and assertion store
 - Phase 4 depends on Phase 3 for end-to-end cert + assertion delivery
-- All 4 phases complete
+- Phase 5 depends on Phase 3's ACME server and Phase 2's issuance log
+- All 5 phases complete

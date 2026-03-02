@@ -1,8 +1,9 @@
-// Package cosigner implements Ed25519 key management and checkpoint signing
-// for the MTC issuance log.
+// Package cosigner implements key management and checkpoint/subtree signing
+// for the MTC issuance log. Supports Ed25519 and ML-DSA (post-quantum) algorithms.
 package cosigner
 
 import (
+	"crypto"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -16,18 +17,69 @@ import (
 	"time"
 
 	"github.com/briantrzupek/ca-extension-merkle/internal/merkle"
+	"github.com/briantrzupek/ca-extension-merkle/internal/mtcformat"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
+	"github.com/cloudflare/circl/sign/mldsa/mldsa87"
 )
 
-// Cosigner signs checkpoints and subtrees with an Ed25519 key.
+// SignatureAlgorithm identifies the cosigner's cryptographic algorithm.
+type SignatureAlgorithm uint8
+
+const (
+	AlgEd25519 SignatureAlgorithm = iota
+	AlgMLDSA44
+	AlgMLDSA65
+	AlgMLDSA87
+)
+
+// String returns the algorithm name.
+func (a SignatureAlgorithm) String() string {
+	switch a {
+	case AlgEd25519:
+		return "ed25519"
+	case AlgMLDSA44:
+		return "mldsa44"
+	case AlgMLDSA65:
+		return "mldsa65"
+	case AlgMLDSA87:
+		return "mldsa87"
+	default:
+		return fmt.Sprintf("unknown(%d)", a)
+	}
+}
+
+// ParseAlgorithm parses a string algorithm name.
+func ParseAlgorithm(s string) (SignatureAlgorithm, error) {
+	switch strings.ToLower(s) {
+	case "ed25519", "":
+		return AlgEd25519, nil
+	case "mldsa44", "ml-dsa-44":
+		return AlgMLDSA44, nil
+	case "mldsa65", "ml-dsa-65":
+		return AlgMLDSA65, nil
+	case "mldsa87", "ml-dsa-87":
+		return AlgMLDSA87, nil
+	default:
+		return 0, fmt.Errorf("cosigner: unknown algorithm %q", s)
+	}
+}
+
+// Cosigner signs checkpoints and subtrees. Supports Ed25519 and ML-DSA algorithms.
 type Cosigner struct {
-	privateKey ed25519.PrivateKey
-	publicKey  ed25519.PublicKey
+	algorithm  SignatureAlgorithm
+	privateKey ed25519.PrivateKey // used when algorithm == AlgEd25519
+	publicKey  ed25519.PublicKey  // used when algorithm == AlgEd25519
+	mldsaKey   crypto.Signer     // used when algorithm == AlgMLDSA*
+	mldsaPub   []byte            // packed ML-DSA public key bytes
 	keyID      string
 	keyHash    uint32 // first 4 bytes of SHA-256(name || 0x0a || pubkey) — C2SP key hash
 	origin     string // log origin for checkpoint identity
+	cosignerID uint16 // numeric ID for MTCSignature (default 0)
 }
 
 // New creates a Cosigner from a PEM-encoded Ed25519 private key file.
+// This is the backward-compatible constructor. For ML-DSA keys, use NewMLDSA.
 func New(keyFile, keyID, origin string) (*Cosigner, error) {
 	data, err := os.ReadFile(keyFile)
 	if err != nil {
@@ -66,6 +118,7 @@ func New(keyFile, keyID, origin string) (*Cosigner, error) {
 
 	pubKey := privKey.Public().(ed25519.PublicKey)
 	c := &Cosigner{
+		algorithm:  AlgEd25519,
 		privateKey: privKey,
 		publicKey:  pubKey,
 		keyID:      keyID,
@@ -85,6 +138,7 @@ func NewFromSeed(seed []byte, keyID, origin string) (*Cosigner, error) {
 	privKey := ed25519.NewKeyFromSeed(seed)
 	pubKey := privKey.Public().(ed25519.PublicKey)
 	c := &Cosigner{
+		algorithm:  AlgEd25519,
 		privateKey: privKey,
 		publicKey:  pubKey,
 		keyID:      keyID,
@@ -92,6 +146,62 @@ func NewFromSeed(seed []byte, keyID, origin string) (*Cosigner, error) {
 	}
 	c.keyHash = c.computeKeyHash()
 
+	return c, nil
+}
+
+// NewMLDSA creates a Cosigner from a PEM-encoded ML-DSA private key file.
+func NewMLDSA(keyFile string, algorithm SignatureAlgorithm, keyID, origin string, cosignerID uint16) (*Cosigner, error) {
+	if algorithm != AlgMLDSA44 && algorithm != AlgMLDSA65 && algorithm != AlgMLDSA87 {
+		return nil, fmt.Errorf("cosigner.NewMLDSA: expected ML-DSA algorithm, got %s", algorithm)
+	}
+
+	data, err := os.ReadFile(keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("cosigner.NewMLDSA: read key: %w", err)
+	}
+
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil, fmt.Errorf("cosigner.NewMLDSA: no PEM block found in %s", keyFile)
+	}
+
+	c := &Cosigner{
+		algorithm:  algorithm,
+		keyID:      keyID,
+		origin:     origin,
+		cosignerID: cosignerID,
+	}
+
+	switch algorithm {
+	case AlgMLDSA44:
+		var sk mldsa44.PrivateKey
+		if err := sk.UnmarshalBinary(block.Bytes); err != nil {
+			return nil, fmt.Errorf("cosigner.NewMLDSA: unpack mldsa44 key: %w", err)
+		}
+		pk := sk.Public().(*mldsa44.PublicKey)
+		c.mldsaKey = &sk
+		c.mldsaPub, _ = pk.MarshalBinary()
+
+	case AlgMLDSA65:
+		var sk mldsa65.PrivateKey
+		if err := sk.UnmarshalBinary(block.Bytes); err != nil {
+			return nil, fmt.Errorf("cosigner.NewMLDSA: unpack mldsa65 key: %w", err)
+		}
+		pk := sk.Public().(*mldsa65.PublicKey)
+		c.mldsaKey = &sk
+		c.mldsaPub, _ = pk.MarshalBinary()
+
+	case AlgMLDSA87:
+		var sk mldsa87.PrivateKey
+		if err := sk.UnmarshalBinary(block.Bytes); err != nil {
+			return nil, fmt.Errorf("cosigner.NewMLDSA: unpack mldsa87 key: %w", err)
+		}
+		pk := sk.Public().(*mldsa87.PublicKey)
+		c.mldsaKey = &sk
+		c.mldsaPub, _ = pk.MarshalBinary()
+	}
+
+	c.keyHash = c.computeKeyHash()
 	return c, nil
 }
 
@@ -120,9 +230,88 @@ func GenerateKey(keyFile string) (ed25519.PublicKey, error) {
 	return pub, nil
 }
 
-// PublicKey returns the Ed25519 public key.
+// GenerateMLDSAKey generates a new ML-DSA key pair and saves the private key to a PEM file.
+// Returns the packed public key bytes.
+func GenerateMLDSAKey(keyFile string, algorithm SignatureAlgorithm) ([]byte, error) {
+	var privBytes, pubBytes []byte
+	var pemType string
+
+	switch algorithm {
+	case AlgMLDSA44:
+		pk, sk, err := mldsa44.GenerateKey(rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("cosigner.GenerateMLDSAKey: %w", err)
+		}
+		privBytes, _ = sk.MarshalBinary()
+		pubBytes, _ = pk.MarshalBinary()
+		pemType = "ML-DSA-44 PRIVATE KEY"
+
+	case AlgMLDSA65:
+		pk, sk, err := mldsa65.GenerateKey(rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("cosigner.GenerateMLDSAKey: %w", err)
+		}
+		privBytes, _ = sk.MarshalBinary()
+		pubBytes, _ = pk.MarshalBinary()
+		pemType = "ML-DSA-65 PRIVATE KEY"
+
+	case AlgMLDSA87:
+		pk, sk, err := mldsa87.GenerateKey(rand.Reader)
+		if err != nil {
+			return nil, fmt.Errorf("cosigner.GenerateMLDSAKey: %w", err)
+		}
+		privBytes, _ = sk.MarshalBinary()
+		pubBytes, _ = pk.MarshalBinary()
+		pemType = "ML-DSA-87 PRIVATE KEY"
+
+	default:
+		return nil, fmt.Errorf("cosigner.GenerateMLDSAKey: not an ML-DSA algorithm: %s", algorithm)
+	}
+
+	block := &pem.Block{
+		Type:  pemType,
+		Bytes: privBytes,
+	}
+
+	f, err := os.OpenFile(keyFile, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("cosigner.GenerateMLDSAKey: create file: %w", err)
+	}
+	defer f.Close()
+
+	if err := pem.Encode(f, block); err != nil {
+		return nil, fmt.Errorf("cosigner.GenerateMLDSAKey: encode PEM: %w", err)
+	}
+
+	return pubBytes, nil
+}
+
+// Algorithm returns the cosigner's signature algorithm.
+func (c *Cosigner) Algorithm() SignatureAlgorithm {
+	return c.algorithm
+}
+
+// CosignerID returns the numeric cosigner identifier for MTCSignature.
+func (c *Cosigner) CosignerID() uint16 {
+	return c.cosignerID
+}
+
+// SetCosignerID sets the numeric cosigner identifier.
+func (c *Cosigner) SetCosignerID(id uint16) {
+	c.cosignerID = id
+}
+
+// PublicKey returns the Ed25519 public key. Panics if not an Ed25519 cosigner.
 func (c *Cosigner) PublicKey() ed25519.PublicKey {
 	return c.publicKey
+}
+
+// PublicKeyBytes returns the raw public key bytes regardless of algorithm.
+func (c *Cosigner) PublicKeyBytes() []byte {
+	if c.algorithm == AlgEd25519 {
+		return []byte(c.publicKey)
+	}
+	return c.mldsaPub
 }
 
 // KeyID returns the key identifier.
@@ -137,7 +326,47 @@ func (c *Cosigner) Origin() string {
 
 // PublicKeyHex returns the hex-encoded public key.
 func (c *Cosigner) PublicKeyHex() string {
-	return hex.EncodeToString(c.publicKey)
+	return hex.EncodeToString(c.PublicKeyBytes())
+}
+
+// Sign signs an arbitrary message using the cosigner's algorithm.
+func (c *Cosigner) Sign(msg []byte) ([]byte, error) {
+	switch c.algorithm {
+	case AlgEd25519:
+		return ed25519.Sign(c.privateKey, msg), nil
+	case AlgMLDSA44, AlgMLDSA65, AlgMLDSA87:
+		return c.mldsaKey.Sign(rand.Reader, msg, crypto.Hash(0))
+	default:
+		return nil, fmt.Errorf("cosigner: unsupported algorithm %s", c.algorithm)
+	}
+}
+
+// Verify verifies a signature over msg using the cosigner's public key.
+func (c *Cosigner) Verify(msg, sig []byte) bool {
+	switch c.algorithm {
+	case AlgEd25519:
+		return ed25519.Verify(c.publicKey, msg, sig)
+	case AlgMLDSA44:
+		pk := new(mldsa44.PublicKey)
+		if err := pk.UnmarshalBinary(c.mldsaPub); err != nil {
+			return false
+		}
+		return mldsa44.Verify(pk, msg, nil, sig)
+	case AlgMLDSA65:
+		pk := new(mldsa65.PublicKey)
+		if err := pk.UnmarshalBinary(c.mldsaPub); err != nil {
+			return false
+		}
+		return mldsa65.Verify(pk, msg, nil, sig)
+	case AlgMLDSA87:
+		pk := new(mldsa87.PublicKey)
+		if err := pk.UnmarshalBinary(c.mldsaPub); err != nil {
+			return false
+		}
+		return mldsa87.Verify(pk, msg, nil, sig)
+	default:
+		return false
+	}
 }
 
 // SignCheckpoint creates a signed checkpoint note per C2SP signed-note format.
@@ -155,7 +384,10 @@ func (c *Cosigner) SignCheckpoint(treeSize int64, rootHash merkle.Hash, timestam
 	body := fmt.Sprintf("%s\n%d\n%s\n", c.origin, treeSize, rootB64)
 
 	// Sign the body.
-	sig := ed25519.Sign(c.privateKey, []byte(body))
+	sig, err := c.Sign([]byte(body))
+	if err != nil {
+		return "", nil, fmt.Errorf("cosigner.SignCheckpoint: %w", err)
+	}
 
 	// Build the signed note.
 	// Signature line format: — <name> <base64(keyHash || sig)>
@@ -218,12 +450,12 @@ func (c *Cosigner) VerifyCheckpoint(note string) (int64, merkle.Hash, error) {
 		if err != nil {
 			continue
 		}
-		if len(sigData) < 4+ed25519.SignatureSize {
+		if len(sigData) < 5 { // at least 4 bytes key hash + 1 byte sig
 			continue
 		}
 
 		sig := sigData[4:] // skip key hash
-		if ed25519.Verify(c.publicKey, []byte(body), sig) {
+		if c.Verify([]byte(body), sig) {
 			return treeSize, rootHash, nil
 		}
 	}
@@ -232,6 +464,7 @@ func (c *Cosigner) VerifyCheckpoint(note string) (int64, merkle.Hash, error) {
 }
 
 // SignSubtree signs a subtree hash for the given range [start, end).
+// This is the legacy format. For MTC-spec compliant signing, use SignSubtreeMTC.
 func (c *Cosigner) SignSubtree(start, end int64, hash merkle.Hash) ([]byte, error) {
 	// Message: start (8 bytes BE) || end (8 bytes BE) || hash (32 bytes)
 	msg := make([]byte, 8+8+merkle.HashSize)
@@ -239,25 +472,53 @@ func (c *Cosigner) SignSubtree(start, end int64, hash merkle.Hash) ([]byte, erro
 	binary.BigEndian.PutUint64(msg[8:16], uint64(end))
 	copy(msg[16:], hash[:])
 
-	sig := ed25519.Sign(c.privateKey, msg)
-	return sig, nil
+	return c.Sign(msg)
 }
 
-// VerifySubtree verifies a subtree signature.
+// VerifySubtree verifies a subtree signature (legacy format).
 func (c *Cosigner) VerifySubtree(start, end int64, hash merkle.Hash, sig []byte) bool {
 	msg := make([]byte, 8+8+merkle.HashSize)
 	binary.BigEndian.PutUint64(msg[0:8], uint64(start))
 	binary.BigEndian.PutUint64(msg[8:16], uint64(end))
 	copy(msg[16:], hash[:])
 
-	return ed25519.Verify(c.publicKey, msg, sig)
+	return c.Verify(msg, sig)
+}
+
+// SignSubtreeMTC signs a subtree per MTC spec §5.4.1 (MTCSubtreeSignatureInput).
+// Returns an MTCSignature suitable for inclusion in an MTCProof.
+func (c *Cosigner) SignSubtreeMTC(logID []byte, start, end int64, hash merkle.Hash) (mtcformat.MTCSignature, error) {
+	input, err := mtcformat.BuildSubtreeSignatureInput(c.cosignerID, logID, uint64(start), uint64(end), hash[:])
+	if err != nil {
+		return mtcformat.MTCSignature{}, fmt.Errorf("cosigner.SignSubtreeMTC: build input: %w", err)
+	}
+
+	sig, err := c.Sign(input)
+	if err != nil {
+		return mtcformat.MTCSignature{}, fmt.Errorf("cosigner.SignSubtreeMTC: sign: %w", err)
+	}
+
+	return mtcformat.MTCSignature{
+		CosignerID: c.cosignerID,
+		Signature:  sig,
+	}, nil
+}
+
+// VerifySubtreeMTC verifies a subtree signature per MTC spec §5.4.1.
+func (c *Cosigner) VerifySubtreeMTC(logID []byte, start, end int64, hash merkle.Hash, sig mtcformat.MTCSignature) bool {
+	input, err := mtcformat.BuildSubtreeSignatureInput(sig.CosignerID, logID, uint64(start), uint64(end), hash[:])
+	if err != nil {
+		return false
+	}
+
+	return c.Verify(input, sig.Signature)
 }
 
 // computeKeyHash computes the C2SP key hash: first 4 bytes of SHA-256("<name>\n<pubkey>").
 func (c *Cosigner) computeKeyHash() uint32 {
 	h := sha256.New()
 	h.Write([]byte(c.keyID + "\n"))
-	h.Write(c.publicKey)
+	h.Write(c.PublicKeyBytes())
 	sum := h.Sum(nil)
 	return binary.BigEndian.Uint32(sum[:4])
 }

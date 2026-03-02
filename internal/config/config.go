@@ -31,8 +31,11 @@ type Config struct {
 	// Watcher configures the background CA polling loop.
 	Watcher WatcherConfig `yaml:"watcher"`
 
-	// Cosigner configures the Ed25519 signing key.
+	// Cosigner configures the primary signing key.
 	Cosigner CosignerConfig `yaml:"cosigner"`
+
+	// AdditionalCosigners configures extra cosigners (e.g., post-quantum ML-DSA).
+	AdditionalCosigners []AdditionalCosignerConfig `yaml:"additional_cosigners"`
 
 	// Logging configures structured logging.
 	Logging LoggingConfig `yaml:"logging"`
@@ -42,6 +45,9 @@ type Config struct {
 
 	// ACME configures the optional ACME server for RFC 8555 certificate issuance.
 	ACME ACMEConfig `yaml:"acme"`
+
+	// LocalCA configures the optional local intermediate CA for embedded proof issuance.
+	LocalCA LocalCAConfig `yaml:"local_ca"`
 }
 
 // ACMEConfig configures the ACME server.
@@ -126,6 +132,33 @@ type WebhookConfig struct {
 
 	// Secret is an HMAC-SHA256 secret for the X-MTC-Signature header.
 	Secret string `yaml:"secret"`
+}
+
+// LocalCAConfig configures the optional local intermediate CA for two-phase
+// MTC certificate signing with embedded inclusion proofs.
+type LocalCAConfig struct {
+	// Enabled turns local CA mode on/off (default: false).
+	Enabled bool `yaml:"enabled"`
+
+	// MTCMode enables MTC-spec-compliant certificates (default: false).
+	// When true, certificates use signatureAlgorithm = id-alg-mtcProof
+	// with the MTCProof in signatureValue instead of a cryptographic signature.
+	MTCMode bool `yaml:"mtc_mode"`
+
+	// KeyFile is the path to the ECDSA P-256 private key (PEM).
+	KeyFile string `yaml:"key_file"`
+
+	// CertFile is the path to the CA certificate (PEM).
+	CertFile string `yaml:"cert_file"`
+
+	// Validity is the default certificate validity period (default: 90 days).
+	Validity time.Duration `yaml:"validity"`
+
+	// Organization is the CA subject organization name.
+	Organization string `yaml:"organization"`
+
+	// Country is the CA subject country.
+	Country string `yaml:"country"`
 }
 
 // LogConfig configures the issuance log identity.
@@ -224,13 +257,35 @@ type WatcherConfig struct {
 	BatchSize int `yaml:"batch_size"`
 }
 
-// CosignerConfig configures the Ed25519 signing key.
+// CosignerConfig configures the primary signing key.
 type CosignerConfig struct {
-	// KeyFile is the path to the Ed25519 private key (PEM-encoded).
+	// KeyFile is the path to the private key (PEM-encoded).
 	KeyFile string `yaml:"key_file"`
 
 	// KeyID is a short identifier for the key (appears in checkpoints).
 	KeyID string `yaml:"key_id"`
+
+	// Algorithm is the signature algorithm: "ed25519", "mldsa44", "mldsa65", "mldsa87".
+	// Default: "ed25519".
+	Algorithm string `yaml:"algorithm"`
+
+	// CosignerID is the numeric identifier for MTCSignature (default: 0).
+	CosignerID uint16 `yaml:"cosigner_id"`
+}
+
+// AdditionalCosignerConfig configures an additional cosigner (e.g., post-quantum).
+type AdditionalCosignerConfig struct {
+	// KeyFile is the path to the private key (PEM-encoded).
+	KeyFile string `yaml:"key_file"`
+
+	// KeyID is a short identifier for the key.
+	KeyID string `yaml:"key_id"`
+
+	// Algorithm is the signature algorithm: "ed25519", "mldsa44", "mldsa65", "mldsa87".
+	Algorithm string `yaml:"algorithm"`
+
+	// CosignerID is the numeric identifier for MTCSignature.
+	CosignerID uint16 `yaml:"cosigner_id"`
 }
 
 // LoggingConfig configures structured logging.

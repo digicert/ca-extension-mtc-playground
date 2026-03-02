@@ -9,6 +9,7 @@ package main
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/briantrzupek/ca-extension-merkle/internal/assertion"
+	"github.com/briantrzupek/ca-extension-merkle/internal/mtccert"
 )
 
 var (
@@ -82,9 +84,103 @@ func main() {
 	}
 
 	leaf := state.PeerCertificates[0]
-	leafSerial := strings.ToUpper(hex.EncodeToString(leaf.SerialNumber.Bytes()))
 
 	fmt.Printf("Server:      %s\n", host)
+
+	// Auto-detect MTC-spec vs legacy format.
+	if mtccert.IsMTCCertificate(leaf.Raw) {
+		verifyMTCCert(leaf.Raw, host)
+	} else {
+		verifyLegacyCert(leaf, state, host)
+	}
+}
+
+func verifyMTCCert(certDER []byte, host string) {
+	parsed, err := mtccert.ParseMTCCertificate(certDER)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: failed to parse MTC certificate: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Printf("Format:      MTC-spec (id-alg-mtcProof)\n")
+	fmt.Printf("Serial/Index: %d\n", parsed.SerialNumber)
+	fmt.Printf("Not Before:  %s\n", parsed.NotBefore.Format(time.RFC3339))
+	fmt.Printf("Not After:   %s\n", parsed.NotAfter.Format(time.RFC3339))
+
+	if parsed.Proof != nil {
+		fmt.Printf("Subtree:     [%d, %d)\n", parsed.Proof.Start, parsed.Proof.End)
+		fmt.Printf("Proof Depth: %d\n", len(parsed.Proof.InclusionProof))
+		fmt.Printf("Signatures:  %d\n", len(parsed.Proof.Signatures))
+	}
+	fmt.Println()
+
+	var results []checkResult
+
+	// Check 1: MTC certificate parsed.
+	results = append(results, checkResult{
+		name:   "MTC certificate received via TLS",
+		passed: true,
+		detail: fmt.Sprintf("serial=%d", parsed.SerialNumber),
+	})
+
+	// Check 2: MTCProof present.
+	if parsed.Proof == nil {
+		results = append(results, checkResult{
+			name:   "MTCProof present in signatureValue",
+			passed: false,
+			detail: "no proof found",
+		})
+		printResults(results)
+		os.Exit(1)
+	}
+	results = append(results, checkResult{
+		name:   "MTCProof present in signatureValue",
+		passed: true,
+		detail: fmt.Sprintf("subtree [%d, %d), %d hashes", parsed.Proof.Start, parsed.Proof.End, len(parsed.Proof.InclusionProof)),
+	})
+
+	// Check 3: Verify inclusion proof.
+	result, verErr := mtccert.VerifyMTCCert(certDER, mtccert.VerifyOptions{})
+	if verErr != nil {
+		results = append(results, checkResult{
+			name:   "Merkle inclusion proof valid",
+			passed: false,
+			detail: verErr.Error(),
+		})
+	} else if result.ProofValid {
+		results = append(results, checkResult{
+			name:   "Merkle inclusion proof valid",
+			passed: true,
+			detail: fmt.Sprintf("leaf %d in subtree [%d, %d)", result.LeafIndex, result.SubtreeStart, result.SubtreeEnd),
+		})
+	} else {
+		results = append(results, checkResult{
+			name:   "Merkle inclusion proof valid",
+			passed: false,
+			detail: "proof verification returned false",
+		})
+	}
+
+	// Check 4: Mode info.
+	if result != nil {
+		mode := result.Mode
+		if result.SignaturesVerified > 0 {
+			mode = fmt.Sprintf("signed (%d cosigners)", result.SignaturesVerified)
+		}
+		results = append(results, checkResult{
+			name:   "Verification mode",
+			passed: true,
+			detail: mode,
+		})
+	}
+
+	printResults(results)
+}
+
+func verifyLegacyCert(leaf *x509.Certificate, state tls.ConnectionState, host string) {
+	leafSerial := strings.ToUpper(hex.EncodeToString(leaf.SerialNumber.Bytes()))
+
+	fmt.Printf("Format:      Legacy (ECDSA + assertion staple)\n")
 	fmt.Printf("Subject:     CN=%s\n", leaf.Subject.CommonName)
 	fmt.Printf("Serial:      %s\n", leafSerial)
 
@@ -187,8 +283,6 @@ func main() {
 				detail: "exact match (latest checkpoint)",
 			})
 		} else if bundle.TreeSize <= cpTreeSize {
-			// The tree has grown since the proof was generated.
-			// The proof is still valid against its own root — it was verified in check 3.
 			results = append(results, checkResult{
 				name:   "Root hash matches checkpoint",
 				passed: true,

@@ -44,6 +44,12 @@ type Bundle struct {
 	RootHash   string `json:"root_hash"`
 	Checkpoint string `json:"checkpoint"`
 
+	// MTC-spec proof fields (used when MTCMode is true)
+	MTCMode      bool     `json:"mtc_mode,omitempty"`
+	SubtreeStart uint64   `json:"subtree_start,omitempty"`
+	SubtreeEnd   uint64   `json:"subtree_end,omitempty"`
+	Signatures   []string `json:"signatures,omitempty"` // hex-encoded cosigner signatures
+
 	// Revocation status
 	Revoked   bool       `json:"revoked"`
 	RevokedAt *time.Time `json:"revoked_at,omitempty"`

@@ -1,61 +1,78 @@
 # mtc-bridge
 
-A standalone Go service that extends a DigiCert Private CA with experimental
-[Merkle Tree Certificate (MTC)](https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-01.html) support.
-It watches the CA's MariaDB database for certificate issuances and revocations,
-constructs an append-only issuance log as a Merkle tree, and serves it via the
-[C2SP tlog-tiles](https://c2sp.org/tlog-tiles) HTTP protocol.
+A standalone Go service implementing
+[Merkle Tree Certificates (MTC)](https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-01.html)
+per `draft-ietf-plants-merkle-tree-certs-01`. It supports **spec-compliant
+signatureless certificates** (`signatureAlgorithm = id-alg-mtcProof`), multi-cosigner
+subtree signing (Ed25519 + ML-DSA post-quantum), batch/landmark infrastructure,
+and a local ACME CA with two certificate modes. It can also extend a DigiCert
+Private CA by watching its MariaDB database for certificate issuances and
+revocations, constructing an append-only issuance log as a Merkle tree, and
+serving it via the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) HTTP protocol.
 
 ---
 
-## What This Does (and Doesn't Do) vs the MTC Standard
+## MTC Spec Compliance
 
-The MTC specification (`draft-ietf-plants-merkle-tree-certs-01`) is a large
-standard covering transparent issuance logs, cosigner coordination, TLS 1.3
-handshake integration, signatureless certificate construction, ACME extensions,
-and browser relying-party logic. This project implements a **simplified subset**
-focused on transparency and auditability.
+This project implements a substantial portion of `draft-ietf-plants-merkle-tree-certs-01`.
+The **primary certificate mode** produces spec-compliant MTC certificates where
+`signatureAlgorithm = id-alg-mtcProof` (OID `1.3.6.1.4.1.44363.47.0`) and the
+`signatureValue` field carries the binary `MTCProof`. A legacy mode using custom
+X.509 extensions is also available for backward compatibility.
 
 ### Implemented
 
 | Feature | Spec Reference | Notes |
 |---|---|---|
-| Append-only issuance log | MTC §5.3 | Full X.509 DER certificates as log entries |
+| **MTC certificate format** | MTC §4 | `signatureAlgorithm = id-alg-mtcProof`, `signatureValue = MTCProof` |
+| **TBSCertificateLogEntry** | MTC §5.3 | ASN.1 structure with SHA-256(SPKI) instead of full public key |
+| **MerkleTreeCertEntry encoding** | MTC §5.3 | TLS presentation language: 1-byte type + 3-byte length + DER |
+| **MTCProof binary format** | MTC §5.4 | uint64 start/end, length-prefixed inclusion proof + signatures |
+| **MTCSignature encoding** | MTC §5.4 | uint16 cosigner_id + 2-byte length prefix + signature bytes |
+| **Multi-cosigner subtree signing** | MTC §5.4.1 | Spec-compliant `mtc-subtree/v1` signing format |
+| **ML-DSA post-quantum cosigning** | MTC §5.5 | ML-DSA-44/65/87 via cloudflare/circl alongside Ed25519 |
+| **Batch/subtree infrastructure** | MTC §5.4 | Batch accumulation with multi-cosigner subtree signing |
+| **Landmark verification** | MTC §5.6 | Signatureless mode: verify against known tree_size → root_hash |
+| **Signed + signatureless modes** | MTC §4 | Auto-detect: cosigner signatures (signed) or landmarks (signatureless) |
+| Append-only issuance log | MTC §5.3 | Full X.509 DER certificates + TBSCertificateLogEntry entries |
 | Merkle tree construction | RFC 9162 §2 | `SHA-256(0x00 ∥ data)` for leaves, `SHA-256(0x01 ∥ left ∥ right)` for interior nodes |
 | C2SP tlog-tiles HTTP API | [tlog-tiles](https://c2sp.org/tlog-tiles) | `/checkpoint`, `/tile/<L>/<N>`, `/tile/entries/<N>` |
 | Signed checkpoints | [C2SP signed-note](https://c2sp.org/signed-note) | Ed25519 signatures in signed-note format |
 | Inclusion proofs | RFC 9162 §2.1.3 | `GET /proof/inclusion?serial=<hex>` endpoint |
 | Revocation tracking | MTC §5.7 | Revocation-by-index bitfield, polled from CA database |
-| Single local cosigner | MTC §5.5 | Ed25519 key pair, signs checkpoints on each tree update |
+| Cosigner signing | MTC §5.5 | Ed25519 + ML-DSA-44/65/87 key pairs for checkpoints and subtrees |
 | Null entry at index 0 | MTC §5.3 | Sentinel entry per spec |
-| Assertion bundles | Phase 1 | Self-contained proof artifacts (JSON + PEM) with cert metadata |
-| X.509 metadata extraction | Phase 1 | Parses DER certificates for display in bundles and UI |
-| Certificate browser | Phase 1 | Admin UI for searching/browsing certs with status badges |
-| Visualization explorer | Phase 4 | Sunburst, treemap, and proof explorer with 4 color modes |
-| `mtc-assertion` CLI | Phase 1 | Standalone tool to fetch, verify, and inspect assertion bundles |
-| Proactive assertion generation | Phase 2 | Background pipeline pre-computes bundles after each checkpoint |
-| Proof freshness management | Phase 2 | Detects and regenerates stale proofs as the tree grows |
-| Assertion polling endpoint | Phase 2 | `GET /assertions/pending` for downstream consumers |
-| Webhook notifications | Phase 2 | Push notifications with HMAC-SHA256 signing when assertions are ready |
-| Assertion statistics | Phase 2 | `GET /assertions/stats` + admin dashboard metrics |
-| ACME server (RFC 8555) | Phase 3 / MTC §7 | Standalone ACME endpoint on separate port with full order lifecycle |
-| JWS request verification | Phase 3 / RFC 7515 | ES256 + RS256 with JWK and KID authentication |
-| Account management | Phase 3 / RFC 8555 §7.3 | Create/lookup accounts by JWK thumbprint |
-| Order lifecycle | Phase 3 / RFC 8555 §7.4 | pending → ready → processing → valid with authorization + challenge flow |
-| http-01 challenge validation | Phase 3 / RFC 8555 §8.3 | Auto-approve mode for internal CAs, real HTTP validation path |
-| CA proxy (finalize) | Phase 3 | Proxies CSR to DigiCert CA REST API, polls for assertion bundle |
-| Certificate + assertion download | Phase 3 | PEM certificate with appended assertion bundle proof |
-| TLS assertion stapling demo | Phase 4 | Server staples assertions via SCT field; client verifies inline |
-| TLS verification client | Phase 4 | Extracts + verifies Merkle proof from TLS handshake |
+| Assertion bundles | — | Self-contained proof artifacts (JSON + PEM) with cert metadata |
+| X.509 metadata extraction | — | Parses DER certificates for display in bundles and UI |
+| Certificate browser | — | Admin UI for searching/browsing certs with status badges |
+| Visualization explorer | — | Sunburst, treemap, and proof explorer with 4 color modes |
+| `mtc-assertion` CLI | — | Standalone tool to fetch, verify, and inspect assertion bundles |
+| Proactive assertion generation | — | Background pipeline pre-computes bundles after each checkpoint |
+| Proof freshness management | — | Detects and regenerates stale proofs as the tree grows |
+| Assertion polling endpoint | — | `GET /assertions/pending` for downstream consumers |
+| Webhook notifications | — | Push notifications with HMAC-SHA256 signing when assertions are ready |
+| Assertion statistics | — | `GET /assertions/stats` + admin dashboard metrics |
+| ACME server (RFC 8555) | MTC §7 | Standalone ACME endpoint on separate port with full order lifecycle |
+| JWS request verification | RFC 7515 | ES256 + RS256 with JWK and KID authentication |
+| Account management | RFC 8555 §7.3 | Create/lookup accounts by JWK thumbprint |
+| Order lifecycle | RFC 8555 §7.4 | pending → ready → processing → valid with authorization + challenge flow |
+| http-01 challenge validation | RFC 8555 §8.3 | Auto-approve mode for internal CAs, real HTTP validation path |
+| CA proxy (finalize) | — | Proxies CSR to DigiCert CA REST API, polls for assertion bundle |
+| Certificate + assertion download | — | PEM certificate with appended assertion bundle proof |
+| TLS assertion stapling | — | Server staples assertions via SCT field; client verifies inline |
+| TLS verification client | — | Extracts + verifies Merkle proof from TLS handshake (MTC + legacy) |
+| Embedded inclusion proofs (legacy) | RFC 6962 | MTC proof in custom X.509 extension (backward-compat mode) |
+| Two-phase certificate signing | — | Pre-cert → Merkle hash → re-sign with proof (legacy mode) |
+| Local intermediate CA | — | ECDSA P-256 self-signed CA with local signing control |
+| `mtc-verify-cert` CLI | — | Offline verification of MTC-spec and legacy certificates (auto-detect) |
+| Pre-certificate log entries | — | `entry_type=2` for canonical TBSCertificate DER |
 
-### Not Implemented
+### Not Yet Implemented
 
 | Feature | Spec Reference | Why |
 |---|---|---|
 | External cosigner protocol | MTC §5.5 | Requires distributed coordination infrastructure |
-| Multi-cosigner coordination | MTC §5.5 | Only single local cosigner supported |
 | TLS 1.3 custom extension | MTC §6 | Go `crypto/tls` does not support custom extensions; demo uses SCT field |
-| Signatureless certificates | MTC §4 | Needs TLS handshake integration to be useful |
 | Browser relying-party logic | MTC §8 | Requires browser/client-side implementation |
 | Consistency proofs | RFC 9162 §2.1.4 | Not yet implemented (inclusion proofs only) |
 
@@ -107,6 +124,11 @@ focused on transparency and auditability.
                             │  │ RFC 8555    │  │    /acme/new-account
                             │  │ JWS verify  │──│──► DigiCert CA REST API
                             │  │ CA proxy    │  │    (finalize → issue cert)
+                            │  │             │  │
+                            │  │ ┌─ local CA─┤  │  Phase 5 (opt-in):
+                            │  │ │ 2-phase   │  │  Pre-cert → hash → re-sign
+                            │  │ │ signing   │  │  with MTC proof in X.509 ext
+                            │  │ └───────────┘  │
                             │  └─────────────┘  │
                             └──────────────────┘
 ```
@@ -119,15 +141,85 @@ port and provides RFC 8555 certificate issuance — it proxies finalize requests
 to the DigiCert CA, then waits for the assertion issuer to build the inclusion
 proof bundle before delivering the certificate with its MTC proof.
 
+**Local CA — MTC-spec mode (primary):** When `local_ca.enabled = true` and
+`local_ca.mtc_mode = true`, the ACME server issues spec-compliant MTC
+certificates. The certificate's `signatureAlgorithm` is `id-alg-mtcProof`
+(OID `1.3.6.1.4.1.44363.47.0`) and `signatureValue` carries the binary
+`MTCProof` (subtree range, inclusion proof, cosigner signatures). Log entries
+use `TBSCertificateLogEntry` with a SHA-256 hash of the SPKI instead of the
+full public key, per the spec. Verification can be done in signed mode
+(cosigner signatures) or signatureless mode (landmark root hashes).
+
+**Local CA — legacy mode:** When `local_ca.enabled = true` without `mtc_mode`,
+the ACME server uses two-phase signing to embed the proof as a custom X.509
+extension (OID `1.3.6.1.4.1.99999.1.1`). This mode is kept for backward
+compatibility. Both modes can be verified offline using `mtc-verify-cert`,
+which auto-detects the certificate format.
+
 ---
 
 ## Prerequisites
 
-- **Go 1.21+**
-- **DigiCert Private CA** running with MariaDB (container `ca-db` on port 3306)
-- **PostgreSQL 16** for the state store (via Docker Compose on port 5432)
-- **DigiCert CA API key** (provisioned during CA setup)
-- `curl`, `openssl`, `jq` for the walkthrough commands
+### DigiCert Private CA
+
+- **DigiCert ONE Private CA** — a provisioned Private CA instance with:
+  - **API Key** — REST API authentication key (from DigiCert ONE admin console)
+  - **CA ID** — identifier for the issuing CA (hex string, e.g., `A76AC522CBABC804919211EB5706CFAD`)
+  - **Template ID** — certificate template configured for TLS issuance (hex string)
+  - **REST API endpoint** — typically `http://<ca-host>/certificate-authority/api/v1`
+- **MariaDB 10.11+** — the CA's backing database (`digicert_ca` schema)
+  - mtc-bridge needs **read-only** `SELECT` access to the `certificate` and `ca` tables
+  - Default credentials: `caadmin`/`capassword` on port 3306
+  - The CA database must be reachable on the `digicert-ca_default` Docker network
+
+### Infrastructure
+
+- **Docker Desktop** and **Docker Compose** (for containerized deployment)
+- **Go 1.21+** (only if building locally outside Docker)
+- **PostgreSQL 16** — provided automatically by `docker-compose.yml` on port 5432
+- `curl`, `openssl`, `python3` for the walkthrough commands
+
+### Network Setup
+
+The DigiCert CA database runs on a separate Docker network. Create it before
+running mtc-bridge if it doesn't already exist:
+
+```bash
+# Create the external network (if the CA isn't already running via Docker Compose)
+docker network create digicert-ca_default
+```
+
+mtc-bridge connects to **two networks**: `mtc-internal` (PostgreSQL) and
+`digicert-ca_default` (MariaDB CA database).
+
+### Required Configuration
+
+Copy `.env.example` to `.env` and fill in your DigiCert credentials:
+
+```bash
+cp .env.example .env
+```
+
+| Variable | Description | Example |
+|---|---|---|
+| `CA_API_KEY` | DigiCert REST API key | `abc123...` |
+| `CA_ID` | Issuing CA identifier | `A76AC522CBABC804919211EB5706CFAD` |
+| `CA_TEMPLATE_ID` | Certificate template ID | `0196198F96545084143B237D9E39FC90` |
+| `CA_URL` | CA API base URL | `http://digicert-ca:8080` |
+| `MTC_CADB_HOST` | MariaDB hostname | `ca-db` |
+| `MTC_CADB_PASSWORD` | MariaDB password | `capassword` |
+
+### Optional: Local CA Mode
+
+For local certificate issuance (no DigiCert CA dependency):
+
+```bash
+make generate-local-ca    # generates keys/local-ca.key + keys/local-ca.pem
+```
+
+Then set `local_ca.enabled: true` in `config.yaml`. For **MTC-spec certificates**
+(recommended), also set `local_ca.mtc_mode: true`. Clients must trust the local
+CA root certificate (`keys/local-ca.pem`).
 
 ---
 
@@ -151,7 +243,11 @@ cp .env.example .env
 # 5. Generate self-signed TLS certs for the ACME server
 ./gen-demo-cert.sh
 
-# 6. Start all services via Docker Compose
+# 6. (Optional) Generate local CA for MTC-spec certificate mode
+make generate-local-ca
+# Then set local_ca.enabled: true and local_ca.mtc_mode: true in config.yaml
+
+# 7. Start all services via Docker Compose
 docker compose up -d
 
 # Or run locally (requires PostgreSQL on localhost:5432):
@@ -165,7 +261,132 @@ The ACME server starts on `https://localhost:8443` (TLS with self-signed cert).
 
 ---
 
-## Demonstrating ACME Functionality (Phase 3)
+## MTC Spec-Compliant Certificate Demo (Primary)
+
+This is the recommended demo path. It generates a spec-compliant MTC certificate
+where `signatureAlgorithm = id-alg-mtcProof` and the `signatureValue` carries the
+binary MTCProof — no traditional signature at all.
+
+### Quick Demo (standalone, no server needed)
+
+```bash
+make demo-mtc
+```
+
+This builds the binaries and runs a complete end-to-end MTC certificate demo:
+1. Generates an ECDSA P-256 key pair and CSR
+2. Builds a `TBSCertificateLogEntry` with SHA-256(SPKI) per the MTC spec
+3. Wraps it in a `MerkleTreeCertEntry` (TLS presentation language encoding)
+4. Builds a Merkle tree and computes the inclusion proof
+5. Constructs an `MTCProof` (signatureless mode — no cosigner signatures)
+6. Builds the final certificate with `signatureAlgorithm = id-alg-mtcProof`
+7. Verifies the certificate end-to-end
+
+### Example Output
+
+```
+=== MTC-Spec Certificate Demo ===
+Domain: demo.example.com
+
+Step 1: Generating ECDSA P-256 key pair and CSR...
+Step 2: Building TBSCertificateLogEntry (SPKI hashed per MTC spec)...
+Step 3: Wrapping in MerkleTreeCertEntry (type=1, TLS encoding)...
+Step 4: Building Merkle tree and computing inclusion proof...
+Step 5: Building MTC certificate (signatureAlgorithm = id-alg-mtcProof)...
+
+=== MTC Certificate Details ===
+  Serial (leaf index):  0
+  Subject:              demo.example.com
+  Signature Algorithm:  id-alg-mtcProof (1.3.6.1.4.1.44363.47.0)
+  MTCProof:
+    Subtree range:      [0, 1)
+    Inclusion proof:    0 sibling hashes (single-leaf tree)
+    Signatures:         0 (signatureless mode)
+
+Step 6: Verifying MTC certificate...
+
+=== Verifying MTC-Spec Certificate ===
+
+  Written to: /tmp/mtc-spec-cert.pem
+  Verify:     ./bin/mtc-verify-cert -cert /tmp/mtc-spec-cert.pem
+
+=== Verifying MTC-Spec Certificate ===
+  Subject:    CN=demo.example.com
+  Serial:     0
+  Issuer:     CN=MTC Demo CA,O=MTC Demo,C=US
+  Format:     MTC-spec (id-alg-mtcProof)
+
+  Subtree:    [0, 1)
+  Leaf Index: 0
+
+MTC Proof Verification:
+  [PASS] Inclusion proof valid (subtree root matches)
+  Mode: signatureless (no cosigner signatures)
+
+All checks passed.
+```
+
+### Certificate Structure
+
+The MTC certificate looks like a standard X.509 certificate, but with a
+fundamentally different trust model:
+
+```
+Certificate:
+    Data:
+        Version: 3 (0x2)
+        Serial Number: 0                    ← leaf index in the Merkle tree
+        Signature Algorithm: 1.3.6.1.4.1.44363.47.0   ← id-alg-mtcProof
+        Issuer: CN=MTC Demo CA, O=MTC Demo, C=US
+        Validity: ...
+        Subject: CN=demo.example.com
+        Subject Public Key Info: ...
+    Signature Algorithm: 1.3.6.1.4.1.44363.47.0
+    Signature Value:                         ← binary MTCProof, not a signature
+        00:00:00:00:00:00:00:00:00:00:00:   (subtree start + end + inclusion proof)
+```
+
+### Verification Modes
+
+MTC certificates support two verification modes:
+
+- **Signatureless mode**: Verify the inclusion proof against a known landmark
+  (tree_size → root_hash mapping). No cosigner signatures needed. This is the
+  most efficient mode and what `make demo-mtc` demonstrates.
+
+- **Signed mode**: Verify cosigner signatures on the subtree root hash. Supports
+  multiple cosigners with Ed25519 and/or ML-DSA (post-quantum) algorithms.
+
+### Verifying MTC Certificates
+
+```bash
+# Offline verification (auto-detects MTC-spec vs legacy format)
+./bin/mtc-verify-cert -cert cert.pem
+
+# With bridge checkpoint comparison
+./bin/mtc-verify-cert -cert cert.pem -bridge-url http://localhost:8080
+```
+
+---
+
+## Embedded Proof Demo (Legacy Mode)
+
+The legacy embedded proof demo generates certificates with a custom X.509
+extension (OID `1.3.6.1.4.1.99999.1.1`) instead of the spec-compliant
+`id-alg-mtcProof` format. This mode is available for backward compatibility.
+
+```bash
+make demo-embedded
+```
+
+This follows the same pattern but embeds the proof in a non-critical X.509
+extension rather than the `signatureValue` field. See the
+[Embedded Inclusion Proofs](#embedded-inclusion-proofs-legacy) section below
+for details.
+
+---
+
+## Demonstrating ACME Functionality
 
 ### Architectural & Design Decisions
 
@@ -177,7 +398,7 @@ The ACME server starts on `https://localhost:8443` (TLS with self-signed cert).
 - **In-memory nonce store** with TTL cleanup.
 - **Database**: 4 new ACME tables, 6 indexes, ~16 CRUD methods.
 - **Config**: `ACMEConfig` with 12 fields, sensible defaults.
-- **Conformance**: 6 ACME tests (23 total), all passing — including full MTC flow with real CA.
+- **Conformance**: 6 ACME tests + 3 MTC-spec tests (26 total), all passing — including full MTC flow with real CA.
 
 ### How to Demonstrate
 
@@ -213,7 +434,7 @@ The ACME server starts on `https://localhost:8443` (TLS with self-signed cert).
    ```bash
    ./bin/mtc-conformance -url http://localhost:8080 -acme-url https://localhost:8443 -verbose
    ```
-   - All 23 tests should pass, including 6 ACME tests.
+   - All 26 tests should pass, including 6 ACME tests and 3 MTC-spec tests.
 
    Or run all tests with:
    ```bash
@@ -237,9 +458,10 @@ The ACME server starts on `https://localhost:8443` (TLS with self-signed cert).
 
 ---
 
-## TLS Assertion Stapling Demo (Phase 4)
+## TLS Assertion Stapling Demo
 
-Phase 4 demonstrates how MTC assertion bundles travel inside a TLS handshake.
+This demo shows how MTC assertion bundles travel inside a TLS handshake. It supports
+both MTC-spec certificates and legacy certificates (auto-detected).
 The `mtc-tls-server` staples the Merkle inclusion proof to every TLS connection
 via the `SignedCertificateTimestamps` extension, and `mtc-tls-verify` connects,
 extracts, and cryptographically verifies the proof.
@@ -302,6 +524,126 @@ Result: MTC-VERIFIED
 
 Visit `https://localhost:4443/` in a browser to see the MTC status page, or
 fetch `https://localhost:4443/mtc-status` for JSON.
+
+---
+
+## Embedded Inclusion Proofs (Legacy)
+
+> **Note:** The MTC spec-compliant certificate format (`id-alg-mtcProof`) is the
+> recommended approach. This legacy mode uses a custom X.509 extension and is
+> maintained for backward compatibility. See [MTC Spec-Compliant Certificate Demo](#mtc-spec-compliant-certificate-demo-primary) above.
+
+This mode embeds MTC inclusion proofs directly inside X.509 certificates as a custom
+extension, eliminating the need for separate assertion bundle delivery. This solves
+the "chicken-and-egg" problem: you need the certificate to compute its Merkle hash,
+but the proof must be in the certificate.
+
+### How It Works: Two-Phase Signing
+
+The approach follows the CT pre-certificate pattern (RFC 6962), adapted for MTC:
+
+1. **Phase 1 — Pre-certificate**: The local CA issues a valid X.509 certificate
+   from the CSR *without* the MTC extension. Its TBSCertificate (the "canonical form")
+   is hashed into the Merkle tree as `entry_type=2`.
+
+2. **Immediate checkpoint**: The tree is updated and a signed checkpoint is created
+   so the inclusion proof can be computed immediately (no 60-second wait).
+
+3. **Phase 2 — Final certificate**: The local CA rebuilds the *identical* template
+   with the MTC inclusion proof extension added, and re-signs. The resulting
+   certificate contains the proof embedded at OID `1.3.6.1.4.1.99999.1.1`.
+
+4. **Verification (offline)**: Any party can parse the certificate, strip the MTC
+   extension to reconstruct the canonical TBSCertificate, compute the leaf hash,
+   and verify the inclusion proof against the root hash — no network access required.
+
+### Setup
+
+```bash
+# 1. Generate a local CA key + certificate (first time only)
+make generate-local-ca
+# Output: keys/local-ca.key, keys/local-ca.pem
+
+# 2. Enable local CA in config.yaml
+#    Set local_ca.enabled: true
+#    Ensure key_file and cert_file paths match
+
+# 3. Start the services
+docker compose up -d
+# Or: make run
+```
+
+### Configuration
+
+```yaml
+local_ca:
+  enabled: true
+  key_file: "keys/local-ca.key"
+  cert_file: "keys/local-ca.pem"
+  validity: 8760h      # 1 year default cert validity
+  organization: "MTC Demo CA"
+  country: "US"
+```
+
+When `local_ca.enabled` is `true`, the ACME server uses the local CA for
+two-phase signing instead of proxying to DigiCert. Both modes can coexist
+(toggle via config). Clients must trust the local CA's root certificate.
+
+### Verifying a Certificate
+
+```bash
+# Verify a certificate with an embedded MTC proof
+./bin/mtc-verify-cert -cert cert.pem
+
+# Optionally compare against the live checkpoint
+./bin/mtc-verify-cert -cert cert.pem -bridge-url http://localhost:8080
+```
+
+Example output:
+
+```
+MTC Embedded Proof Verifier
+===========================
+  Subject:   example.com
+  Serial:    5BF2A744...
+  Issuer:    MTC Bridge Local CA
+  Valid:     2026-03-01 to 2027-03-01
+
+Verification Results:
+---------------------
+[PASS] MTC inclusion proof extension found (OID 1.3.6.1.4.1.99999.1.1)
+       Log Origin:   http://localhost:8080
+       Leaf Index:   42
+       Tree Size:    43
+       Root Hash:    c838a8b9d03f79f8...
+       Proof Depth:  6 sibling hashes
+[PASS] Merkle inclusion proof is valid
+
+All checks passed.
+```
+
+### X.509 Extension Format
+
+The proof is encoded as an ASN.1 SEQUENCE in a non-critical extension:
+
+```
+OID: 1.3.6.1.4.1.99999.1.1
+
+MTCInclusionProof ::= SEQUENCE {
+    logOrigin    UTF8String,       -- bridge URL / log identifier
+    leafIndex    INTEGER,          -- position in the Merkle tree
+    treeSize     INTEGER,          -- tree size at time of proof
+    rootHash     OCTET STRING(32), -- SHA-256 root hash
+    proofHashes  SET OF OCTET STRING(32), -- sibling hashes
+    checkpoint   UTF8String        -- signed checkpoint text
+}
+```
+
+### Demo Script
+
+```bash
+./demo-embedded-proof.sh
+```
 
 ---
 
@@ -723,8 +1065,11 @@ Target: http://localhost:8080
   acme_new_order                 [PASS]
   acme_order_flow                [PASS]
   acme_full_mtc_flow             [PASS]
+  mtc_cert_format                [PASS]
+  mtc_proof_roundtrip            [PASS]
+  mtc_log_entry_reconstruct      [PASS]
 
-Results: 23 passed, 0 failed, 0 skipped
+Results: 26 passed, 0 failed, 0 skipped
 ```
 
 ### Step 15 — ACME Server: Directory & Nonce
@@ -805,6 +1150,8 @@ inclusion proof → certificate download with MTC assertion bundle attached.
 | GET | `/assertions/pending?since=<id>&limit=N` | Pre-computed bundles since a checkpoint (polling) |
 | GET | `/assertions/stats` | Assertion statistics: total, fresh, stale, pending counts |
 | GET | `/revocation` | Revocation bitfield (binary) |
+| GET | `/landmarks` | List all landmarks (tree_size → root_hash for signatureless verification) |
+| GET | `/landmark/{tree_size}` | Specific landmark with subtree signatures |
 | GET | `/admin/` | HTMX admin dashboard |
 | GET | `/admin/certs` | Certificate browser with search |
 | GET | `/admin/certs/{index}` | Certificate detail page with assertion bundle |
@@ -926,33 +1273,39 @@ to fetch the full bundle.
 ```
 cmd/
   mtc-bridge/          Main service binary
-  mtc-conformance/     Conformance test client (23 tests)
+  mtc-conformance/     Conformance test client (26 tests, including MTC-spec)
   mtc-assertion/       CLI tool: fetch, verify, inspect assertion bundles
-  mtc-tls-server/      Demo TLS server with MTC assertion stapling
-  mtc-tls-verify/      TLS verification client — extracts and verifies assertions
+  mtc-tls-server/      Demo TLS server with MTC assertion stapling (MTC-spec + legacy)
+  mtc-tls-verify/      TLS verification client — auto-detects MTC-spec vs legacy certs
+  mtc-verify-cert/     Verify certificates offline (MTC-spec id-alg-mtcProof + legacy extension)
+  demo-embedded-cert/  Standalone demo: generates MTC-spec or legacy certs (--mtc-mode flag)
 internal/
-  acme/                RFC 8555 ACME server (JWS, nonce, accounts, orders, challenges, CA proxy)
+  acme/                RFC 8555 ACME server (JWS, nonce, accounts, orders, challenges, CA proxy + local CA)
   admin/               HTMX dashboard + certificate browser + visualization explorer
-  assertion/           Assertion bundle builder + JSON/PEM formatter
+  assertion/           Assertion bundle builder + JSON/PEM formatter (MTC proof fields)
   assertionissuer/     Background assertion generation pipeline + webhooks
+  batch/               Batch accumulation + multi-cosigner subtree signing + landmarks
   cadb/                Read-only MariaDB adapter for DigiCert CA
   certutil/            X.509 DER parser for certificate metadata extraction
-  config/              YAML config with env-var substitution
-  cosigner/            Ed25519 key management + checkpoint signing
-  issuancelog/         Entry construction + Merkle tree maintenance
+  config/              YAML config with env-var substitution (cosigner algorithms, batch, landmarks)
+  cosigner/            Ed25519 + ML-DSA key management, checkpoint signing, spec subtree signing
+  issuancelog/         Entry construction + Merkle tree maintenance + MTC log entries
+  localca/             Local intermediate CA — MTC-spec certs + legacy two-phase signing
   merkle/              RFC 9162 Merkle tree operations + inclusion proofs
+  mtccert/             MTC certificate construction, parsing, and verification (raw ASN.1)
+  mtcformat/           MTC wire format: MTCProof, MTCSignature, MerkleTreeCertEntry, TBSCertificateLogEntry
   revocation/          Revocation bitfield construction
-  store/               PostgreSQL state store (11 tables, search/detail/assertion/ACME queries)
-  tlogtiles/           C2SP tlog-tiles HTTP handler + proof + assertion API
+  store/               PostgreSQL state store (subtree_signatures, landmarks, ACME tables)
+  tlogtiles/           C2SP tlog-tiles HTTP handler + proof + assertion + landmark APIs
   watcher/             CA database poller (certs + revocations)
 docs/
   adr/                 Architecture Decision Records (ADR-000 through ADR-008)
   design/              System overview documentation
-keys/                  Ed25519 cosigner key (generated, not committed)
+keys/                  Ed25519/ML-DSA cosigner keys + local CA key/cert (generated, not committed)
 config.yaml            Local development configuration
 docker-compose.yml     Docker Compose for mtc-bridge + PostgreSQL
-Dockerfile             Multi-stage Docker build
-Makefile               Build, test, run, conformance targets
+Dockerfile             Multi-stage Docker build (7 binaries)
+Makefile               Build, test, run, conformance, demo-mtc, demo-embedded targets
 ```
 
 ---
@@ -965,9 +1318,13 @@ sections:
 - **`state_db`** — PostgreSQL connection for the Merkle tree state
 - **`ca_db`** — MariaDB connection for the DigiCert CA database (read-only)
 - **`watcher`** — Polling intervals for certificates and revocations
-- **`cosigner`** — Ed25519 key file path and key ID
+- **`cosigner`** — Primary cosigner: key file, key ID, algorithm (`ed25519`, `mldsa44`, `mldsa65`, `mldsa87`), cosigner_id
+- **`additional_cosigners`** — Additional cosigners for multi-cosigner subtree signing
+- **`batch`** — Batch processing: enabled, window duration, min_size
+- **`landmarks`** — Landmark designation: enabled, interval
 - **`assertion_issuer`** — Assertion generation pipeline (batch size, concurrency, webhooks)
 - **`acme`** — ACME server settings (port, CA proxy URL, API key, CA/template IDs, auto-approve)
+- **`local_ca`** — Local intermediate CA (key/cert files, validity, org, **`mtc_mode`** for spec-compliant certs)
 - **`http`** — Listen address, timeouts, cache TTLs
 
 Environment variables can override config values (see `docker-compose.yml` for
@@ -978,10 +1335,10 @@ the full list).
 ## Running Tests
 
 ```bash
-# Unit tests (44+ tests across merkle, config, cosigner, certutil, tlogtiles packages)
+# Unit tests (60+ tests across merkle, config, cosigner, certutil, tlogtiles, localca, mtccert, mtcformat packages)
 make test
 
-# Conformance tests (23 tests, requires a running mtc-bridge instance)
+# Conformance tests (26 tests including MTC-spec, requires a running mtc-bridge instance)
 make conformance
 
 # Go vet
@@ -1103,7 +1460,7 @@ MTC_CADB_DATABASE=digicert_ca
    make build
    ./bin/mtc-conformance -url http://localhost:8080 -acme-url https://localhost:8443 -verbose
    ```
-   All 23 tests pass, including `acme_full_mtc_flow` which exercises the complete pipeline.
+   All 26 tests pass, including `acme_full_mtc_flow` which exercises the complete pipeline.
 5. Or run the end-to-end demo script:
    ```bash
    ./demo-e2e.sh
@@ -1122,6 +1479,7 @@ services communicate via Docker DNS names (e.g., `postgres`, `digicert-ca`, `ca-
 
 ### What the Full MTC Flow Demonstrates
 
+**With DigiCert CA proxy:**
 1. **ACME Account Creation** — ES256 JWS-signed request, account stored by JWK thumbprint
 2. **Order + Authorization** — DNS identifier order with http-01 challenge (auto-approved for internal CA)
 3. **CSR Finalize** — RSA-2048 CSR proxied to DigiCert Private CA REST API
@@ -1130,8 +1488,47 @@ services communicate via Docker DNS names (e.g., `postgres`, `digicert-ca`, `ca-
 6. **Assertion Proof Generation** — Assertion issuer builds inclusion proof bundle at next checkpoint
 7. **Certificate Download** — ACME certificate endpoint returns X.509 PEM + MTC assertion bundle
 
-The assertion bundle contains the Merkle inclusion proof, leaf index, log origin, and
-signed checkpoint — everything needed to independently verify the certificate's presence
-in the transparency log.
+**With local CA (MTC-spec mode — recommended):**
+1. **ACME Account + Order** — same JWS-signed flow
+2. **CSR Finalize** — builds `TBSCertificateLogEntry` with SHA-256(SPKI), appends to tree
+3. **MTC Certificate** — `signatureAlgorithm = id-alg-mtcProof`, serial = leaf index
+4. **Verification** — cosigner signatures (signed) or landmark root hashes (signatureless)
 
 See the script output and admin UI (`http://localhost:8080/admin/`) for verification.
+
+### MTC-Spec Certificate Mode (Recommended)
+
+When `local_ca.enabled: true` and `local_ca.mtc_mode: true` in `config.yaml`,
+the ACME server issues spec-compliant MTC certificates:
+
+1. **ACME Account + Order** — same as DigiCert proxy flow
+2. **Finalize** — builds TBSCertificateLogEntry (SPKI hashed), appends to tree, computes inclusion proof
+3. **Certificate** — `signatureAlgorithm = id-alg-mtcProof`, `signatureValue = MTCProof`
+4. **Verification** — signed mode (cosigner signatures) or signatureless mode (landmarks)
+
+```bash
+# Generate local CA (first time)
+make generate-local-ca
+
+# Enable in config.yaml:
+#   local_ca.enabled: true
+#   local_ca.mtc_mode: true
+
+# Standalone demo (no server needed)
+make demo-mtc
+```
+
+### Legacy Embedded Proof Mode
+
+When `local_ca.enabled: true` without `mtc_mode`, the ACME server uses two-phase
+signing to embed the proof in a custom X.509 extension:
+
+1. **ACME Account + Order** — same as DigiCert proxy flow
+2. **Finalize (two-phase)** — local CA issues pre-cert → hashes TBS into tree → re-signs with proof
+3. **Certificate Download** — final cert PEM includes the embedded proof extension + CA cert chain
+4. **Offline Verification** — `mtc-verify-cert -cert cert.pem` verifies the proof without network access
+
+```bash
+# Standalone demo (no server needed)
+make demo-embedded
+```

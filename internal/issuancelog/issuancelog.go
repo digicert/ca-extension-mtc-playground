@@ -14,13 +14,16 @@ import (
 	"github.com/briantrzupek/ca-extension-merkle/internal/cadb"
 	"github.com/briantrzupek/ca-extension-merkle/internal/cosigner"
 	"github.com/briantrzupek/ca-extension-merkle/internal/merkle"
+	"github.com/briantrzupek/ca-extension-merkle/internal/mtcformat"
 	"github.com/briantrzupek/ca-extension-merkle/internal/store"
 )
 
 // Entry type constants matching the MTC spec.
 const (
 	EntryTypeNull        int16 = 0 // null sentinel at index 0
-	EntryTypeCertificate int16 = 1 // X.509 certificate
+	EntryTypeCertificate int16 = 1 // X.509 certificate (full DER)
+	EntryTypePrecert     int16 = 2 // pre-certificate (canonical TBSCertificate DER)
+	EntryTypeMTC         int16 = 3 // MerkleTreeCertEntry with TBSCertificateLogEntry
 )
 
 // Log manages the issuance log lifecycle.
@@ -87,6 +90,86 @@ func BuildEntry(cert *cadb.Certificate) *store.LogEntry {
 		SerialHex:  cert.SerialNumber,
 		CACertID:   cert.IssuerID,
 	}
+}
+
+// BuildPrecertEntry constructs a log entry from a canonical TBSCertificate DER.
+// This is used by the local CA flow where the TBSCertificate (without MTC
+// extension) is the canonical form hashed into the tree.
+func BuildPrecertEntry(tbsDER []byte, serialHex string) *store.LogEntry {
+	certHash := sha256.Sum256(tbsDER)
+	data := make([]byte, 2+4+len(tbsDER))
+	binary.LittleEndian.PutUint16(data[0:2], uint16(EntryTypePrecert))
+	binary.LittleEndian.PutUint32(data[2:6], uint32(len(tbsDER)))
+	copy(data[6:], tbsDER)
+
+	return &store.LogEntry{
+		EntryType:  EntryTypePrecert,
+		EntryData:  data,
+		CertSHA256: certHash[:],
+		SerialHex:  serialHex,
+		CACertID:   "local-ca",
+	}
+}
+
+// BuildMTCEntry constructs a spec-compliant log entry from a TBSCertificateLogEntry DER.
+// The entry data is a MerkleTreeCertEntry (1-byte type + 3-byte length + DER).
+// This is what gets leaf-hashed and appended to the Merkle tree in MTC mode.
+func BuildMTCEntry(logEntryDER []byte, serialHex string) (*store.LogEntry, error) {
+	entry := &mtcformat.MerkleTreeCertEntry{
+		Type: mtcformat.EntryTypeTBSCert,
+		Data: logEntryDER,
+	}
+	wireData, err := mtcformat.MarshalEntry(entry)
+	if err != nil {
+		return nil, fmt.Errorf("issuancelog.BuildMTCEntry: marshal: %w", err)
+	}
+
+	certHash := sha256.Sum256(logEntryDER)
+	return &store.LogEntry{
+		EntryType:  EntryTypeMTC,
+		EntryData:  wireData,
+		CertSHA256: certHash[:],
+		SerialHex:  serialHex,
+		CACertID:   "local-ca",
+	}, nil
+}
+
+// AppendDirectEntry appends a single entry directly to the log, updates the
+// Merkle tree, and returns the leaf index. This is used by the local CA flow
+// where entries bypass the watcher.
+func (l *Log) AppendDirectEntry(ctx context.Context, entry *store.LogEntry) (int64, error) {
+	currentSize, err := l.store.TreeSize(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("issuancelog.AppendDirectEntry: tree size: %w", err)
+	}
+
+	entry.Index = currentSize
+	if err := l.store.AppendEntry(ctx, entry); err != nil {
+		return 0, fmt.Errorf("issuancelog.AppendDirectEntry: append: %w", err)
+	}
+
+	leafHash := merkle.LeafHash(entry.EntryData)
+	if err := l.store.SetTreeNode(ctx, 0, currentSize, leafHash); err != nil {
+		return 0, fmt.Errorf("issuancelog.AppendDirectEntry: set leaf: %w", err)
+	}
+
+	newSize := currentSize + 1
+	if err := l.recomputeInterior(ctx, currentSize, newSize); err != nil {
+		return 0, fmt.Errorf("issuancelog.AppendDirectEntry: recompute: %w", err)
+	}
+
+	l.logger.Info("appended direct entry",
+		"index", currentSize,
+		"entry_type", entry.EntryType,
+		"serial", entry.SerialHex,
+	)
+
+	return currentSize, nil
+}
+
+// Store returns the underlying store (needed by the ACME server to build proofs).
+func (l *Log) Store() *store.Store {
+	return l.store
 }
 
 // AppendCertificates processes a batch of certificates: builds entries, appends

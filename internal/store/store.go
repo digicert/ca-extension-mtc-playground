@@ -196,6 +196,32 @@ var migrations = []string{
 	)`,
 	`CREATE INDEX IF NOT EXISTS idx_cert_metadata_ca ON cert_metadata(ca_cert_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_cert_metadata_batch ON cert_metadata(batch_window)`,
+
+	// Phase 5: local CA embedded proof support — store final cert DER on ACME orders.
+	`ALTER TABLE acme_orders ADD COLUMN IF NOT EXISTS final_cert_der BYTEA`,
+	`ALTER TABLE acme_orders ADD COLUMN IF NOT EXISTS ca_cert_der BYTEA`,
+
+	// Phase 6: MTC spec compliance — subtree signatures and landmarks.
+	`CREATE TABLE IF NOT EXISTS subtree_signatures (
+		id            BIGSERIAL PRIMARY KEY,
+		start_idx     BIGINT NOT NULL,
+		end_idx       BIGINT NOT NULL,
+		subtree_hash  BYTEA NOT NULL,
+		cosigner_id   SMALLINT NOT NULL,
+		algorithm     SMALLINT NOT NULL,
+		signature     BYTEA NOT NULL,
+		checkpoint_id BIGINT,
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
+	`CREATE INDEX IF NOT EXISTS idx_subtree_sigs_range ON subtree_signatures(start_idx, end_idx)`,
+
+	`CREATE TABLE IF NOT EXISTS landmarks (
+		id            BIGSERIAL PRIMARY KEY,
+		tree_size     BIGINT NOT NULL UNIQUE,
+		root_hash     BYTEA NOT NULL,
+		checkpoint_id BIGINT NOT NULL,
+		created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	)`,
 }
 
 // --- Log Entries ---
@@ -1340,6 +1366,31 @@ func scanACMEOrders(rows *sql.Rows) ([]*ACMEOrder, error) {
 	return orders, rows.Err()
 }
 
+// SetOrderFinalCertDER stores the final certificate DER (with embedded proof)
+// and the CA certificate DER for an ACME order.
+func (s *Store) SetOrderFinalCertDER(ctx context.Context, orderID string, finalCertDER, caCertDER []byte) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE acme_orders SET final_cert_der = $2, ca_cert_der = $3, updated_at = NOW() WHERE id = $1`,
+		orderID, finalCertDER, caCertDER)
+	if err != nil {
+		return fmt.Errorf("store.SetOrderFinalCertDER: %w", err)
+	}
+	return nil
+}
+
+// GetOrderFinalCertDER retrieves the final certificate DER and CA cert DER for an order.
+// Returns nil, nil, nil if no final cert is stored.
+func (s *Store) GetOrderFinalCertDER(ctx context.Context, orderID string) ([]byte, []byte, error) {
+	var finalDER, caDER []byte
+	err := s.db.QueryRowContext(ctx,
+		`SELECT final_cert_der, ca_cert_der FROM acme_orders WHERE id = $1`, orderID).
+		Scan(&finalDER, &caDER)
+	if err != nil {
+		return nil, nil, fmt.Errorf("store.GetOrderFinalCertDER: %w", err)
+	}
+	return finalDER, caDER, nil
+}
+
 // --- ACME Authorization/Challenge Methods ---
 
 // GetACMEAuthorization retrieves an authorization by ID.
@@ -1852,4 +1903,129 @@ func (s *Store) GetVizStats(ctx context.Context) (*VizStats, error) {
 		stats.CoverageRate = float64(stats.FreshCount) / float64(stats.Total)
 	}
 	return &stats, nil
+}
+
+// --- Subtree Signatures ---
+
+// SubtreeSignature stores a cosigner's signature over a subtree range.
+type SubtreeSignature struct {
+	ID           int64     `json:"id"`
+	StartIdx     int64     `json:"start_idx"`
+	EndIdx       int64     `json:"end_idx"`
+	SubtreeHash  []byte    `json:"subtree_hash"`
+	CosignerID   int16     `json:"cosigner_id"`
+	Algorithm    int16     `json:"algorithm"`
+	Signature    []byte    `json:"signature"`
+	CheckpointID *int64    `json:"checkpoint_id,omitempty"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// SaveSubtreeSignature stores a cosigner's subtree signature.
+func (s *Store) SaveSubtreeSignature(ctx context.Context, sig *SubtreeSignature) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO subtree_signatures (start_idx, end_idx, subtree_hash, cosigner_id, algorithm, signature, checkpoint_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		sig.StartIdx, sig.EndIdx, sig.SubtreeHash, sig.CosignerID, sig.Algorithm, sig.Signature, sig.CheckpointID)
+	if err != nil {
+		return fmt.Errorf("store.SaveSubtreeSignature: %w", err)
+	}
+	return nil
+}
+
+// GetSubtreeSignatures retrieves all cosigner signatures for a subtree range.
+func (s *Store) GetSubtreeSignatures(ctx context.Context, start, end int64) ([]*SubtreeSignature, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, start_idx, end_idx, subtree_hash, cosigner_id, algorithm, signature, checkpoint_id, created_at
+		 FROM subtree_signatures WHERE start_idx = $1 AND end_idx = $2
+		 ORDER BY cosigner_id`, start, end)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetSubtreeSignatures: %w", err)
+	}
+	defer rows.Close()
+
+	var sigs []*SubtreeSignature
+	for rows.Next() {
+		var sig SubtreeSignature
+		var cpID sql.NullInt64
+		if err := rows.Scan(&sig.ID, &sig.StartIdx, &sig.EndIdx, &sig.SubtreeHash,
+			&sig.CosignerID, &sig.Algorithm, &sig.Signature, &cpID, &sig.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store.GetSubtreeSignatures: scan: %w", err)
+		}
+		if cpID.Valid {
+			sig.CheckpointID = &cpID.Int64
+		}
+		sigs = append(sigs, &sig)
+	}
+	return sigs, rows.Err()
+}
+
+// --- Landmarks ---
+
+// Landmark marks a specific tree size as a landmark for signatureless verification.
+type Landmark struct {
+	ID           int64     `json:"id"`
+	TreeSize     int64     `json:"tree_size"`
+	RootHash     []byte    `json:"root_hash"`
+	CheckpointID int64     `json:"checkpoint_id"`
+	CreatedAt    time.Time `json:"created_at"`
+}
+
+// SaveLandmark stores a landmark.
+func (s *Store) SaveLandmark(ctx context.Context, lm *Landmark) error {
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO landmarks (tree_size, root_hash, checkpoint_id)
+		 VALUES ($1, $2, $3)
+		 ON CONFLICT (tree_size) DO NOTHING`,
+		lm.TreeSize, lm.RootHash, lm.CheckpointID)
+	if err != nil {
+		return fmt.Errorf("store.SaveLandmark: %w", err)
+	}
+	return nil
+}
+
+// GetLandmark retrieves a landmark by tree size.
+func (s *Store) GetLandmark(ctx context.Context, treeSize int64) (*Landmark, error) {
+	var lm Landmark
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, tree_size, root_hash, checkpoint_id, created_at
+		 FROM landmarks WHERE tree_size = $1`, treeSize).
+		Scan(&lm.ID, &lm.TreeSize, &lm.RootHash, &lm.CheckpointID, &lm.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store.GetLandmark: %w", err)
+	}
+	return &lm, nil
+}
+
+// LatestLandmark retrieves the most recent landmark.
+func (s *Store) LatestLandmark(ctx context.Context) (*Landmark, error) {
+	var lm Landmark
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id, tree_size, root_hash, checkpoint_id, created_at
+		 FROM landmarks ORDER BY tree_size DESC LIMIT 1`).
+		Scan(&lm.ID, &lm.TreeSize, &lm.RootHash, &lm.CheckpointID, &lm.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("store.LatestLandmark: %w", err)
+	}
+	return &lm, nil
+}
+
+// ListLandmarks returns all landmarks ordered by tree size.
+func (s *Store) ListLandmarks(ctx context.Context) ([]*Landmark, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, tree_size, root_hash, checkpoint_id, created_at
+		 FROM landmarks ORDER BY tree_size`)
+	if err != nil {
+		return nil, fmt.Errorf("store.ListLandmarks: %w", err)
+	}
+	defer rows.Close()
+
+	var lms []*Landmark
+	for rows.Next() {
+		var lm Landmark
+		if err := rows.Scan(&lm.ID, &lm.TreeSize, &lm.RootHash, &lm.CheckpointID, &lm.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store.ListLandmarks: scan: %w", err)
+		}
+		lms = append(lms, &lm)
+	}
+	return lms, rows.Err()
 }

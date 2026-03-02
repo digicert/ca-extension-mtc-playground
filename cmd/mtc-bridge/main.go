@@ -23,6 +23,7 @@ import (
 	"github.com/briantrzupek/ca-extension-merkle/internal/config"
 	"github.com/briantrzupek/ca-extension-merkle/internal/cosigner"
 	"github.com/briantrzupek/ca-extension-merkle/internal/issuancelog"
+	"github.com/briantrzupek/ca-extension-merkle/internal/localca"
 	"github.com/briantrzupek/ca-extension-merkle/internal/revocation"
 	"github.com/briantrzupek/ca-extension-merkle/internal/store"
 	"github.com/briantrzupek/ca-extension-merkle/internal/tlogtiles"
@@ -32,6 +33,7 @@ import (
 func main() {
 	configFile := flag.String("config", "config.yaml", "path to configuration file")
 	generateKey := flag.String("generate-key", "", "generate a new Ed25519 key and exit")
+	generateLocalCA := flag.Bool("generate-local-ca", false, "generate a self-signed local CA key + cert and exit")
 	flag.Parse()
 
 	// Key generation mode.
@@ -44,6 +46,24 @@ func main() {
 		fmt.Printf("Generated Ed25519 key pair.\n")
 		fmt.Printf("Public key (hex): %x\n", pub)
 		fmt.Printf("Private key saved to: %s\n", *generateKey)
+		return
+	}
+
+	// Local CA generation mode.
+	if *generateLocalCA {
+		keyFile := "keys/local-ca.key"
+		certFile := "keys/local-ca.pem"
+		if err := os.MkdirAll("keys", 0755); err != nil {
+			fmt.Fprintf(os.Stderr, "error creating keys directory: %v\n", err)
+			os.Exit(1)
+		}
+		if err := localca.GenerateCA(keyFile, certFile, "MTC Demo CA", "US"); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Generated local CA key pair.\n")
+		fmt.Printf("Private key: %s\n", keyFile)
+		fmt.Printf("Certificate: %s\n", certFile)
 		return
 	}
 
@@ -168,8 +188,30 @@ func main() {
 			AssertionTimeout:      cfg.ACME.AssertionTimeout,
 			AssertionPollInterval: cfg.ACME.AssertionPollInterval,
 			AutoApproveChallenge:  cfg.ACME.AutoApproveChallenge,
+			MTCMode:               cfg.LocalCA.MTCMode,
 		}
-		acmeSrv := acme.New(stateStore, acmeCfg, logger.With("component", "acme"))
+
+		// Optionally initialize local CA for embedded proof issuance.
+		var lca *localca.LocalCA
+		if cfg.LocalCA.Enabled {
+			lca, err = localca.New(localca.Config{
+				KeyFile:      cfg.LocalCA.KeyFile,
+				CertFile:     cfg.LocalCA.CertFile,
+				Validity:     cfg.LocalCA.Validity,
+				Organization: cfg.LocalCA.Organization,
+				Country:      cfg.LocalCA.Country,
+			})
+			if err != nil {
+				logger.Error("failed to initialize local CA", "error", err)
+				os.Exit(1)
+			}
+			logger.Info("local CA initialized for embedded proof issuance",
+				"key_file", cfg.LocalCA.KeyFile,
+				"cert_file", cfg.LocalCA.CertFile,
+			)
+		}
+
+		acmeSrv := acme.New(stateStore, acmeCfg, logger.With("component", "acme"), lca, ilog)
 		acmeServer := &http.Server{
 			Addr:         cfg.ACME.Addr,
 			Handler:      acmeSrv,

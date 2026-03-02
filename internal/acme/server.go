@@ -6,6 +6,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/briantrzupek/ca-extension-merkle/internal/issuancelog"
+	"github.com/briantrzupek/ca-extension-merkle/internal/localca"
 	"github.com/briantrzupek/ca-extension-merkle/internal/store"
 )
 
@@ -21,20 +23,25 @@ type Config struct {
 	AssertionTimeout      time.Duration
 	AssertionPollInterval time.Duration
 	AutoApproveChallenge  bool
+	MTCMode               bool // When true, issue MTC-spec-compliant certs (signatureless)
 }
 
 // Server is the ACME server.
 type Server struct {
-	store  *store.Store
-	cfg    Config
-	logger *slog.Logger
-	mux    *http.ServeMux
-	mu     sync.Mutex
-	nonces map[string]time.Time
+	store   *store.Store
+	cfg     Config
+	logger  *slog.Logger
+	mux     *http.ServeMux
+	mu      sync.Mutex
+	nonces  map[string]time.Time
+	localCA *localca.LocalCA   // nil = DigiCert proxy, non-nil = local CA with embedded proofs
+	ilog    *issuancelog.Log   // needed for direct log append in local CA mode
 }
 
-// New creates a new ACME server.
-func New(s *store.Store, cfg Config, logger *slog.Logger) *Server {
+// New creates a new ACME server. The localCA and ilog parameters are optional;
+// when non-nil, the server uses the local CA for two-phase signing with embedded
+// inclusion proofs instead of proxying to the DigiCert CA.
+func New(s *store.Store, cfg Config, logger *slog.Logger, lca *localca.LocalCA, ilog *issuancelog.Log) *Server {
 	if cfg.OrderExpiry <= 0 {
 		cfg.OrderExpiry = 24 * time.Hour
 	}
@@ -45,11 +52,13 @@ func New(s *store.Store, cfg Config, logger *slog.Logger) *Server {
 		cfg.AssertionPollInterval = 5 * time.Second
 	}
 	srv := &Server{
-		store:  s,
-		cfg:    cfg,
-		logger: logger,
-		mux:    http.NewServeMux(),
-		nonces: make(map[string]time.Time),
+		store:   s,
+		cfg:     cfg,
+		logger:  logger,
+		mux:     http.NewServeMux(),
+		nonces:  make(map[string]time.Time),
+		localCA: lca,
+		ilog:    ilog,
 	}
 	srv.mux.HandleFunc("GET /acme/directory", srv.handleDirectory)
 	srv.mux.HandleFunc("HEAD /acme/new-nonce", srv.handleNewNonce)

@@ -46,6 +46,8 @@ services:
       MTC_CADB_PASSWORD: ${MTC_CADB_PASSWORD:-capassword}
       MTC_CADB_DATABASE: ${MTC_CADB_DATABASE:-digicert_ca}
       MTC_COSIGNER_KEY_FILE: /etc/mtc-bridge/keys/cosigner.key
+      MTC_LOCAL_CA_KEY: /etc/mtc-bridge/keys/local-ca.key
+      MTC_LOCAL_CA_CERT: /etc/mtc-bridge/keys/local-ca.pem
     volumes:
       - ./config.yaml:/etc/mtc-bridge/config.yaml:ro
       - ./keys:/etc/mtc-bridge/keys:ro
@@ -81,6 +83,8 @@ services:
       CA_URL: ${CA_URL:-http://localhost}
       MTC_BRIDGE_URL: http://mtc-bridge:8080
       MTC_COSIGNER_KEY_FILE: /etc/mtc-bridge/keys/cosigner.key
+      MTC_LOCAL_CA_KEY: /etc/mtc-bridge/keys/local-ca.key
+      MTC_LOCAL_CA_CERT: /etc/mtc-bridge/keys/local-ca.pem
     command: [ "-config", "/etc/mtc-bridge/config.yaml" ]
     volumes:
       - ./config.yaml:/etc/mtc-bridge/config.yaml:ro

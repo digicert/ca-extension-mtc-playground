@@ -16,6 +16,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"flag"
 	"fmt"
 	"io"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	"github.com/briantrzupek/ca-extension-merkle/internal/assertion"
+	"github.com/briantrzupek/ca-extension-merkle/internal/mtccert"
 )
 
 var (
@@ -45,7 +47,9 @@ var (
 type assertionState struct {
 	mu         sync.RWMutex
 	baseCert   tls.Certificate
-	leaf       *x509.Certificate
+	leaf       *x509.Certificate // nil for MTC-format certs
+	mtcParsed  *mtccert.ParsedMTCCert
+	isMTC      bool
 	serial     string
 	bundle     *assertion.Bundle
 	bundleJSON []byte
@@ -161,51 +165,123 @@ func (s *assertionState) refreshLoop(ctx context.Context, bridgeBase, serial str
 func main() {
 	flag.Parse()
 
-	// Load TLS certificate and key.
-	tlsCert, err := tls.LoadX509KeyPair(*certFile, *keyFile)
+	// Read cert PEM to auto-detect format.
+	certPEM, err := os.ReadFile(*certFile)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error loading TLS cert/key: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error reading certificate: %v\n", err)
+		os.Exit(1)
+	}
+	certBlock, _ := pem.Decode(certPEM)
+	if certBlock == nil {
+		fmt.Fprintf(os.Stderr, "error: no PEM block found in %s\n", *certFile)
 		os.Exit(1)
 	}
 
-	leaf, err := x509.ParseCertificate(tlsCert.Certificate[0])
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error parsing certificate: %v\n", err)
-		os.Exit(1)
-	}
+	isMTC := mtccert.IsMTCCertificate(certBlock.Bytes)
 
-	serial := strings.ToUpper(hex.EncodeToString(leaf.SerialNumber.Bytes()))
+	var state *assertionState
 
-	fmt.Printf("MTC TLS Server\n")
-	fmt.Printf("  Subject:    %s\n", leaf.Subject.CommonName)
-	fmt.Printf("  Serial:     %s\n", serial)
-	fmt.Printf("  Listen:     %s\n", *listenAddr)
-	fmt.Printf("  Bridge:     %s\n", *bridgeURL)
-	fmt.Println()
+	if isMTC {
+		// MTC-format cert: Go's TLS lib can't parse id-alg-mtcProof,
+		// so we build the tls.Certificate manually with raw DER.
+		parsed, parseErr := mtccert.ParseMTCCertificate(certBlock.Bytes)
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "error parsing MTC certificate: %v\n", parseErr)
+			os.Exit(1)
+		}
 
-	state := &assertionState{
-		baseCert: tlsCert,
-		leaf:     leaf,
-		serial:   serial,
-	}
+		keyPEM, keyErr := os.ReadFile(*keyFile)
+		if keyErr != nil {
+			fmt.Fprintf(os.Stderr, "error reading key: %v\n", keyErr)
+			os.Exit(1)
+		}
+		keyBlock, _ := pem.Decode(keyPEM)
+		if keyBlock == nil {
+			fmt.Fprintf(os.Stderr, "error: no PEM block found in %s\n", *keyFile)
+			os.Exit(1)
+		}
+		privKey, keyParseErr := parsePrivateKey(keyBlock.Bytes)
+		if keyParseErr != nil {
+			fmt.Fprintf(os.Stderr, "error parsing private key: %v\n", keyParseErr)
+			os.Exit(1)
+		}
 
-	// Initial assertion fetch.
-	fmt.Print("Fetching MTC assertion... ")
-	state.fetchAssertion(*bridgeURL, serial)
-	state.mu.RLock()
-	if state.bundle != nil {
-		fmt.Printf("OK (leaf=%d, tree_size=%d)\n", state.bundle.LeafIndex, state.bundle.TreeSize)
+		tlsCert := tls.Certificate{
+			Certificate: [][]byte{certBlock.Bytes},
+			PrivateKey:  privKey,
+		}
+
+		serial := fmt.Sprintf("%d", parsed.SerialNumber)
+		fmt.Printf("MTC TLS Server (MTC-spec mode)\n")
+		fmt.Printf("  Serial/Index: %d\n", parsed.SerialNumber)
+		fmt.Printf("  Not Before:   %s\n", parsed.NotBefore.Format(time.RFC3339))
+		fmt.Printf("  Not After:    %s\n", parsed.NotAfter.Format(time.RFC3339))
+		fmt.Printf("  Listen:       %s\n", *listenAddr)
+		fmt.Printf("  Bridge:       %s\n", *bridgeURL)
+		if parsed.Proof != nil {
+			fmt.Printf("  Subtree:      [%d, %d)\n", parsed.Proof.Start, parsed.Proof.End)
+			fmt.Printf("  Proof hashes: %d\n", len(parsed.Proof.InclusionProof))
+			fmt.Printf("  Signatures:   %d\n", len(parsed.Proof.Signatures))
+		}
+		fmt.Println()
+
+		state = &assertionState{
+			baseCert:  tlsCert,
+			mtcParsed: parsed,
+			isMTC:     true,
+			serial:    serial,
+		}
 	} else {
-		fmt.Printf("not available yet (will retry)\n")
+		// Legacy format: standard x509 cert with ECDSA signature.
+		tlsCert, loadErr := tls.LoadX509KeyPair(*certFile, *keyFile)
+		if loadErr != nil {
+			fmt.Fprintf(os.Stderr, "error loading TLS cert/key: %v\n", loadErr)
+			os.Exit(1)
+		}
+
+		leaf, parseErr := x509.ParseCertificate(tlsCert.Certificate[0])
+		if parseErr != nil {
+			fmt.Fprintf(os.Stderr, "error parsing certificate: %v\n", parseErr)
+			os.Exit(1)
+		}
+
+		serial := strings.ToUpper(hex.EncodeToString(leaf.SerialNumber.Bytes()))
+
+		fmt.Printf("MTC TLS Server\n")
+		fmt.Printf("  Subject:    %s\n", leaf.Subject.CommonName)
+		fmt.Printf("  Serial:     %s\n", serial)
+		fmt.Printf("  Listen:     %s\n", *listenAddr)
+		fmt.Printf("  Bridge:     %s\n", *bridgeURL)
+		fmt.Println()
+
+		state = &assertionState{
+			baseCert: tlsCert,
+			leaf:     leaf,
+			serial:   serial,
+		}
 	}
-	state.mu.RUnlock()
+
+	// Initial assertion fetch (for legacy certs that need bridge assertions).
+	if !state.isMTC {
+		fmt.Print("Fetching MTC assertion... ")
+		state.fetchAssertion(*bridgeURL, state.serial)
+		state.mu.RLock()
+		if state.bundle != nil {
+			fmt.Printf("OK (leaf=%d, tree_size=%d)\n", state.bundle.LeafIndex, state.bundle.TreeSize)
+		} else {
+			fmt.Printf("not available yet (will retry)\n")
+		}
+		state.mu.RUnlock()
+	} else {
+		fmt.Println("MTC proof embedded in certificate (no bridge assertion needed)")
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	// Start background refresh.
-	if *refreshSec > 0 {
-		go state.refreshLoop(ctx, *bridgeURL, serial, time.Duration(*refreshSec)*time.Second)
+	// Start background refresh (only for legacy certs that need bridge assertions).
+	if *refreshSec > 0 && !state.isMTC {
+		go state.refreshLoop(ctx, *bridgeURL, state.serial, time.Duration(*refreshSec)*time.Second)
 	}
 
 	// HTTP handlers.
@@ -274,12 +350,56 @@ func main() {
 	fmt.Println("\nShutdown complete.")
 }
 
+func parsePrivateKey(der []byte) (interface{}, error) {
+	if key, err := x509.ParsePKCS8PrivateKey(der); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return key, nil
+	}
+	return nil, fmt.Errorf("unsupported private key type")
+}
+
 func serveStatusPage(w http.ResponseWriter, state *assertionState) {
-	leaf := state.leaf
-	available := state.bundle != nil
+	var subject, serial, issuer, notBefore, notAfter string
+
+	if state.isMTC && state.mtcParsed != nil {
+		p := state.mtcParsed
+		serial = fmt.Sprintf("%d", p.SerialNumber)
+		subject = "(MTC-spec cert)"
+		issuer = "(MTC-spec cert)"
+		notBefore = p.NotBefore.Format("2006-01-02 15:04 UTC")
+		notAfter = p.NotAfter.Format("2006-01-02 15:04 UTC")
+	} else if state.leaf != nil {
+		subject = state.leaf.Subject.CommonName
+		serial = state.serial
+		issuer = state.leaf.Issuer.CommonName
+		notBefore = state.leaf.NotBefore.Format("2006-01-02 15:04 UTC")
+		notAfter = state.leaf.NotAfter.Format("2006-01-02 15:04 UTC")
+	}
 
 	var assertionHTML string
-	if available {
+	if state.isMTC && state.mtcParsed != nil && state.mtcParsed.Proof != nil {
+		p := state.mtcParsed.Proof
+		mode := "signatureless"
+		if len(p.Signatures) > 0 {
+			mode = fmt.Sprintf("signed (%d cosigners)", len(p.Signatures))
+		}
+		assertionHTML = fmt.Sprintf(`
+        <div style="background:#065f46;border:1px solid #059669;border-radius:8px;padding:16px;margin-top:16px">
+          <div style="font-size:18px;font-weight:700;color:#34d399;margin-bottom:8px">MTC Proof Embedded (id-alg-mtcProof)</div>
+          <table style="width:100%%;color:#d1fae5;font-size:14px">
+            <tr><td style="padding:4px 8px;color:#6ee7b7">Leaf Index</td><td>%d</td></tr>
+            <tr><td style="padding:4px 8px;color:#6ee7b7">Subtree</td><td>[%d, %d)</td></tr>
+            <tr><td style="padding:4px 8px;color:#6ee7b7">Proof Depth</td><td>%d sibling hashes</td></tr>
+            <tr><td style="padding:4px 8px;color:#6ee7b7">Mode</td><td>%s</td></tr>
+          </table>
+        </div>`,
+			state.mtcParsed.SerialNumber, p.Start, p.End, len(p.InclusionProof), mode)
+	} else if state.bundle != nil {
 		b := state.bundle
 		rootTrunc := b.RootHash
 		if len(rootTrunc) > 16 {
@@ -305,9 +425,6 @@ func serveStatusPage(w http.ResponseWriter, state *assertionState) {
           <p style="color:#fed7aa;margin-top:8px">The MTC assertion bundle is not yet available. The server will retry periodically.</p>
         </div>`
 	}
-
-	notBefore := leaf.NotBefore.Format("2006-01-02 15:04 UTC")
-	notAfter := leaf.NotAfter.Format("2006-01-02 15:04 UTC")
 
 	fmt.Fprintf(w, `<!DOCTYPE html>
 <html>
@@ -335,7 +452,7 @@ func serveStatusPage(w http.ResponseWriter, state *assertionState) {
 <body>
   <div class="container">
     <h1>MTC-Verified TLS Connection</h1>
-    <p class="subtitle">This connection carries a Merkle Tree Certificate assertion stapled via the TLS SCT extension.</p>
+    <p class="subtitle">This connection carries a Merkle Tree Certificate with embedded or stapled proof.</p>
 
     <div class="card">
       <h2>Certificate</h2>
@@ -353,10 +470,11 @@ func serveStatusPage(w http.ResponseWriter, state *assertionState) {
     <div class="card">
       <h2>How It Works</h2>
       <p style="font-size:13px;color:#94a3b8;line-height:1.6">
-        This server fetches an MTC assertion bundle from the mtc-bridge transparency log
-        and staples it to TLS handshakes using the <code style="color:#38bdf8">SignedCertificateTimestamps</code>
-        extension field. Connecting clients can extract the assertion and verify the Merkle
-        inclusion proof, confirming this certificate is logged in the transparency tree.
+        This server presents an MTC certificate with a Merkle inclusion proof.
+        In MTC-spec mode, the proof is embedded directly in the certificate
+        (<code style="color:#38bdf8">signatureAlgorithm = id-alg-mtcProof</code>).
+        In legacy mode, an assertion bundle is fetched from the bridge and stapled via the
+        <code style="color:#38bdf8">SignedCertificateTimestamps</code> TLS extension.
       </p>
       <p style="font-size:13px;color:#94a3b8;line-height:1.6;margin-top:8px">
         Verify with: <code style="color:#34d399">mtc-tls-verify -url https://localhost%s -insecure</code>
@@ -364,14 +482,14 @@ func serveStatusPage(w http.ResponseWriter, state *assertionState) {
     </div>
 
     <div class="footer">
-      MTC Bridge &mdash; Phase 4 TLS Assertion Stapling Demo
+      MTC Bridge &mdash; TLS Assertion Stapling Demo
     </div>
   </div>
 </body>
 </html>`,
-		leaf.Subject.CommonName,
-		state.serial,
-		leaf.Issuer.CommonName,
+		subject,
+		serial,
+		issuer,
 		notBefore,
 		notAfter,
 		assertionHTML,
