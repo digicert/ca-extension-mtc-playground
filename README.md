@@ -10,6 +10,8 @@ Private CA by watching its MariaDB database for certificate issuances and
 revocations, constructing an append-only issuance log as a Merkle tree, and
 serving it via the [C2SP tlog-tiles](https://c2sp.org/tlog-tiles) HTTP protocol.
 
+<img width="1500" height="1077" alt="preview-image" src="https://github.com/user-attachments/assets/e204a988-2e1d-41cf-9b50-c28d58d61779" />
+
 ---
 
 ## MTC Spec Compliance
