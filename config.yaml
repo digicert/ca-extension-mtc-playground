@@ -55,7 +55,7 @@ logging:
 
 assertion_issuer:
   # enabled: true  # default; set false to disable
-  batch_size: 100
+  batch_size: 5000
   concurrency: 4
   staleness_threshold: 5
   # webhooks:
