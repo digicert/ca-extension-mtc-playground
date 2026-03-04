@@ -32,3 +32,11 @@ docker-compose.override.yml
 # Generated TLS certs
 acme-cert.pem
 acme-key.pem
+
+# Compiled binaries (outside bin/)
+demo-embedded-cert
+mtc-bridge
+mtc-conformance
+mtc-tls-server
+mtc-tls-verify
+mtc-verify-cert

@@ -1,0 +1,12 @@
+DigiCert (R) MTC Playground — Commercial License
+
+This software is available under a commercial license from DigiCert, Inc.
+under DigiCert's Master Services Agreement.
+
+For commercial licensing terms, see:
+  https://www.digicert.com/master-services-agreement/
+
+To obtain a commercial license, contact:
+  sales@digicert.com
+
+Copyright (C) 2026 DigiCert, Inc. All rights reserved.

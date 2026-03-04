@@ -1,5 +1,7 @@
 # MTC Playground (mtc-bridge)
 
+[![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](LICENSE.txt)
+
 A standalone Go service implementing
 [Merkle Tree Certificates (MTC)](https://www.ietf.org/archive/id/draft-ietf-plants-merkle-tree-certs-01.html)
 per `draft-ietf-plants-merkle-tree-certs-01`. It supports **spec-compliant
@@ -1413,7 +1415,48 @@ Headers:
 
 ## License
 
-Internal / experimental. Not for production use.
+Copyright (C) 2026 DigiCert, Inc.
+
+This project is licensed under a **dual-license model**:
+
+### Open Source License — AGPL v3
+
+You may use, modify, and distribute this software under the terms of the
+[GNU Affero General Public License v3.0](LICENSE.txt).
+
+**Key AGPL obligations:**
+- Source code of any modifications must be made available under the AGPL v3.
+- If you run a modified version of this software as a network service, you must
+  make the complete source code available to users of that service (AGPL Section 13).
+- Any derivative works must also be licensed under the AGPL v3.
+
+### Commercial License
+
+A commercial license is available from DigiCert, Inc. under the
+[DigiCert Master Services Agreement](https://www.digicert.com/master-services-agreement/).
+
+The commercial license allows you to:
+- Use the software in proprietary products without AGPL obligations
+- Distribute modifications without open-source requirements
+- Integrate into commercial SaaS offerings
+
+For commercial licensing inquiries, contact [sales@digicert.com](mailto:sales@digicert.com).
+See [LICENSE_COMMERCIAL.txt](LICENSE_COMMERCIAL.txt) for details.
+
+### Contributing
+
+We welcome contributions! Before we can accept your contribution, you must agree
+to our [Contributor License Agreement (CLA)](CLA.txt).
+
+**Why a CLA?** The CLA ensures DigiCert can continue to offer this project under
+both the open-source AGPL v3 and commercial licenses. Your contributions will be
+available to the entire community under the AGPL v3, and may also be included in
+DigiCert's commercial offerings.
+
+When you submit a pull request for the first time, the CLA Assistant bot will
+prompt you to review and sign the CLA electronically. This is a one-time process.
+
+For questions about the CLA, contact [opensourcelegal@digicert.com](mailto:opensourcelegal@digicert.com).
 
 ## Fully Automated End-to-End Demo
 

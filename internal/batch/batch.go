@@ -1,3 +1,11 @@
+// Copyright (C) 2026 DigiCert, Inc.
+//
+// Licensed under the dual-license model:
+//   1. GNU Affero General Public License v3.0 (AGPL v3) — see LICENSE.txt
+//   2. DigiCert Commercial License — see LICENSE_COMMERCIAL.txt
+//
+// For commercial licensing, contact sales@digicert.com.
+
 // Package batch implements batch accumulation and multi-cosigner subtree signing
 // for the MTC issuance log per the MTC spec §5.4.
 package batch

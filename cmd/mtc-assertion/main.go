@@ -1,3 +1,11 @@
+// Copyright (C) 2026 DigiCert, Inc.
+//
+// Licensed under the dual-license model:
+//   1. GNU Affero General Public License v3.0 (AGPL v3) — see LICENSE.txt
+//   2. DigiCert Commercial License — see LICENSE_COMMERCIAL.txt
+//
+// For commercial licensing, contact sales@digicert.com.
+
 // Command mtc-assertion is a CLI tool for fetching, verifying, and inspecting
 // MTC assertion bundles from a running mtc-bridge server.
 package main
