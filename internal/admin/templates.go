@@ -92,6 +92,29 @@ const dashboardHTML = `<!DOCTYPE html>
 					<p class="text-sm font-medium mt-1">{{ .IssuerStats.LastRunDuration }}</p>
 				</div>
 			</div>
+			<h2 class="text-lg font-semibold mb-4 mt-6">Log Integrity</h2>
+			<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-6">
+				<div>
+					<p class="text-gray-500 text-sm">Proof Depth</p>
+					<p class="text-2xl font-bold">{{ .ProofDepth }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Landmarks</p>
+					<p class="text-2xl font-bold">{{ .LandmarkCount }}</p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Consistency</p>
+					<p class="text-2xl font-bold"><a href="/admin/viz?tab=consistency&old={{ .VerifyLinkOld }}&new={{ .VerifyLinkNew }}" class="{{ .VerifyClass }} hover:underline">{{ .VerifyStatus }}</a></p>
+				</div>
+				<div>
+					<p class="text-gray-500 text-sm">Proof Range</p>
+					<p class="text-sm font-medium mt-1">1 → {{ .Stats.TreeSize }}</p>
+				</div>
+				<div class="col-span-2">
+					<p class="text-gray-500 text-sm">Last Verified</p>
+					<p class="text-sm font-medium mt-1">{{ .VerifyDetail }}</p>
+				</div>
+			</div>
 		</section>
 
 		<div class="grid md:grid-cols-2 gap-8">
@@ -145,6 +168,23 @@ const dashboardHTML = `<!DOCTYPE html>
 				</div>
 			</section>
 		</div>
+
+		<!-- Recent Consistency Proofs -->
+		<section class="bg-white rounded-lg shadow p-6 mt-8">
+			<h2 class="text-lg font-semibold mb-4">Recent Consistency Proofs</h2>
+			<table class="w-full">
+				<thead>
+					<tr class="border-b text-left text-gray-500 text-sm">
+						<th class="px-2 py-1">Old Size</th>
+						<th class="px-2 py-1">New Size</th>
+						<th class="px-2 py-1">Hashes</th>
+						<th class="px-2 py-1">Time</th>
+					</tr>
+				</thead>
+				<tbody hx-get="/admin/consistency-proofs" hx-trigger="load, every 10s" hx-swap="innerHTML">
+				</tbody>
+			</table>
+		</section>
 	</main>
 
 	<footer class="text-center text-gray-400 text-sm py-8">
@@ -349,6 +389,7 @@ const vizExplorerHTML = `<!DOCTYPE html>
 			<div class="tab" id="tabTreemap" onclick="switchView('treemap')">Treemap</div>
 			<div class="tab" id="tabProof" onclick="switchView('proof')">Proof Explorer</div>
 			<div class="tab" id="tabMerkle" onclick="switchView('merkle')">Merkle Tree</div>
+			<div class="tab" id="tabConsistency" onclick="switchView('consistency')">Consistency</div>
 		</div>
 		<div class="controls" id="vizControls">
 			<button class="btn-g" onclick="drillUp()">Drill Up</button>
@@ -379,6 +420,17 @@ const vizExplorerHTML = `<!DOCTYPE html>
 			</select>
 			<button onclick="verifyMerkleRandom()" style="background:linear-gradient(135deg,#34d399,#22d3ee);color:#0a0e1a;border:none;font-weight:600">Verify Proof</button>
 			<span id="merkleStatus" style="color:#64748b;font-size:.8rem;align-self:center"></span>
+		</div>
+		<div class="controls" id="consistencyControls" style="display:none">
+			<select id="oldSizeSelect" style="padding:6px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:.85rem;width:220px">
+				<option value="">Old tree size...</option>
+			</select>
+			<span style="color:#64748b;font-size:1rem;align-self:center">→</span>
+			<select id="newSizeSelect" style="padding:6px 14px;border-radius:8px;border:1px solid #334155;background:#1e293b;color:#e2e8f0;font-size:.85rem;width:220px">
+				<option value="">New tree size...</option>
+			</select>
+			<button class="btn-g" onclick="loadConsistencyProof()">Verify Consistency</button>
+			<span id="consistencyStatus" style="color:#64748b;font-size:.8rem;align-self:center"></span>
 		</div>
 		<div class="stats" id="statsBar"></div>
 		<div class="breadcrumb" id="breadcrumb"></div>
@@ -411,6 +463,9 @@ const vizExplorerHTML = `<!DOCTYPE html>
 	let highlightRevoked = false;
 	let proofData = null;
 	let proofSegments = [];
+	let consistencyData = null;
+	let consistencySegments = [];
+	let checkpointsList = null;
 
 	// ─── MERKLE TREE STATE ───
 	let merkleSubtreeData = null;
@@ -838,6 +893,11 @@ const vizExplorerHTML = `<!DOCTYPE html>
 			renderProofLegend();
 			return;
 		}
+		if (viewMode === 'consistency') {
+			drawConsistencyProof();
+			renderConsistencyLegend();
+			return;
+		}
 		if (!hierarchy) return;
 		if (viewMode === 'sunburst') drawSunburst();
 		else drawTreemap();
@@ -1033,6 +1093,24 @@ const vizExplorerHTML = `<!DOCTYPE html>
 					canvas.style.cursor = 'pointer';
 					tip.innerHTML = '<strong>' + seg.label + '</strong>' +
 						(seg.hash ? '<br><span style="font-family:monospace;font-size:.75rem;color:#60a5fa">' + seg.hash + '</span>' : '<br><em style="color:#64748b">Intermediate computed hash</em>');
+					tip.style.display = 'block';
+					tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 380) + 'px';
+					tip.style.top = (e.clientY - 10) + 'px';
+					break;
+				}
+			}
+			if (!found) { canvas.style.cursor = 'default'; tip.style.display = 'none'; }
+			return;
+		}
+
+		// Handle consistency proof tooltips
+		if (viewMode === 'consistency' && consistencyData) {
+			for (const seg of consistencySegments) {
+				if (mx >= seg.x && mx <= seg.x + seg.w && my >= seg.y && my <= seg.y + seg.h) {
+					found = true;
+					canvas.style.cursor = 'pointer';
+					tip.innerHTML = '<strong>' + seg.label + '</strong>' +
+						(seg.hash ? '<br><span style="font-family:monospace;font-size:.75rem;color:#60a5fa">' + seg.hash + '</span>' : '');
 					tip.style.display = 'block';
 					tip.style.left = Math.min(e.clientX + 14, window.innerWidth - 380) + 'px';
 					tip.style.top = (e.clientY - 10) + 'px';
@@ -1351,6 +1429,231 @@ const vizExplorerHTML = `<!DOCTYPE html>
 		content.innerHTML = html;
 	}
 
+	// ─── CONSISTENCY PROOF ───
+	async function loadCheckpoints() {
+		if (checkpointsList) return;
+		try {
+			const res = await fetch('/admin/checkpoints/list');
+			checkpointsList = await res.json();
+			const oldSel = document.getElementById('oldSizeSelect');
+			const newSel = document.getElementById('newSizeSelect');
+			checkpointsList.forEach(cp => {
+				const label = 'Size ' + cp.treeSize.toLocaleString() + ' (' + cp.time + ')';
+				oldSel.add(new Option(label, cp.treeSize));
+				newSel.add(new Option(label, cp.treeSize));
+			});
+			if (checkpointsList.length >= 2) {
+				oldSel.value = checkpointsList[1].treeSize;
+				newSel.value = checkpointsList[0].treeSize;
+			}
+		} catch (err) {
+			console.error('Failed to load checkpoints:', err);
+		}
+	}
+
+	async function loadConsistencyProof() {
+		const oldSize = document.getElementById('oldSizeSelect').value;
+		const newSize = document.getElementById('newSizeSelect').value;
+		if (!oldSize || !newSize) {
+			document.getElementById('consistencyStatus').textContent = 'Select both tree sizes';
+			return;
+		}
+		document.getElementById('consistencyStatus').textContent = 'Computing proof...';
+		try {
+			const res = await fetch('/admin/viz/consistency?old=' + oldSize + '&new=' + newSize);
+			if (!res.ok) {
+				document.getElementById('consistencyStatus').textContent = await res.text();
+				consistencyData = null;
+				redraw();
+				return;
+			}
+			consistencyData = await res.json();
+			document.getElementById('consistencyStatus').textContent = '';
+			redraw();
+			renderConsistencySidePanel();
+		} catch (err) {
+			document.getElementById('consistencyStatus').textContent = 'Error: ' + err.message;
+			consistencyData = null;
+			redraw();
+		}
+	}
+
+	function drawConsistencyProof() {
+		const W = canvas.width / devicePixelRatio, H = canvas.height / devicePixelRatio;
+		consistencySegments = [];
+
+		if (!consistencyData) {
+			ctx.fillStyle = '#94a3b8'; ctx.textAlign = 'center'; ctx.font = '14px system-ui';
+			ctx.fillText('Select two checkpoints and click "Verify Consistency"', W / 2, H / 2 - 10);
+			ctx.fillStyle = '#64748b'; ctx.font = '12px system-ui';
+			ctx.fillText('Proves the old tree is a prefix of the new tree (RFC 9162 \u00a72.1.4)', W / 2, H / 2 + 14);
+			return;
+		}
+
+		const d = consistencyData;
+		const proofLen = d.proof.length;
+		const nodeR = 24;
+
+		// Two root nodes at the top
+		const oldRootX = W * 0.25, newRootX = W * 0.75, rootY = 70;
+
+		// Draw dashed arrow between roots
+		ctx.strokeStyle = d.verified ? '#22c55e50' : '#f8717150';
+		ctx.lineWidth = 2;
+		ctx.setLineDash([6, 4]);
+		ctx.beginPath();
+		ctx.moveTo(oldRootX + nodeR + 15, rootY);
+		ctx.lineTo(newRootX - nodeR - 15, rootY);
+		ctx.stroke();
+		ctx.setLineDash([]);
+
+		// Arrow label
+		ctx.fillStyle = d.verified ? '#22c55e' : '#f87171';
+		ctx.font = 'bold 13px system-ui'; ctx.textAlign = 'center';
+		ctx.fillText(d.verified ? 'CONSISTENT' : 'INCONSISTENT', W / 2, rootY - 12);
+		ctx.fillStyle = '#64748b'; ctx.font = '10px system-ui';
+		ctx.fillText(proofLen + ' proof hash' + (proofLen !== 1 ? 'es' : ''), W / 2, rootY + 6);
+
+		// Draw old root
+		drawConsistencyNode(oldRootX, rootY, nodeR, '#f59e0b', d.oldRoot,
+			'Old Root (size ' + d.oldSize.toLocaleString() + ')', true);
+		consistencySegments.push({
+			x: oldRootX - nodeR, y: rootY - nodeR, w: nodeR * 2, h: nodeR * 2,
+			hash: d.oldRoot, label: 'Old Root (size ' + d.oldSize + ')'
+		});
+
+		// Draw new root
+		drawConsistencyNode(newRootX, rootY, nodeR, '#22c55e', d.newRoot,
+			'New Root (size ' + d.newSize.toLocaleString() + ')', true);
+		consistencySegments.push({
+			x: newRootX - nodeR, y: rootY - nodeR, w: nodeR * 2, h: nodeR * 2,
+			hash: d.newRoot, label: 'New Root (size ' + d.newSize + ')'
+		});
+
+		// Proof hashes as a vertical chain
+		if (proofLen > 0) {
+			const chainTop = rootY + 70;
+			const chainHeight = H - chainTop - 50;
+			const stepH = Math.min(55, chainHeight / proofLen);
+			const nodeRSmall = 18;
+
+			for (let i = 0; i < proofLen; i++) {
+				const y = chainTop + i * stepH;
+				const x = W / 2;
+
+				// Connect to previous node
+				if (i > 0) {
+					ctx.strokeStyle = '#334155'; ctx.lineWidth = 1.5;
+					ctx.beginPath();
+					ctx.moveTo(x, y - nodeRSmall);
+					ctx.lineTo(x, y - stepH + nodeRSmall);
+					ctx.stroke();
+				} else {
+					// Connect first proof hash to both roots
+					ctx.strokeStyle = '#f59e0b30'; ctx.lineWidth = 1.5;
+					ctx.beginPath(); ctx.moveTo(oldRootX, rootY + nodeR); ctx.lineTo(x, y - nodeRSmall); ctx.stroke();
+					ctx.strokeStyle = '#22c55e30';
+					ctx.beginPath(); ctx.moveTo(newRootX, rootY + nodeR); ctx.lineTo(x, y - nodeRSmall); ctx.stroke();
+				}
+
+				drawConsistencyNode(x, y, nodeRSmall, '#3b82f6', d.proof[i],
+					'Proof[' + i + ']', false);
+				consistencySegments.push({
+					x: x - nodeRSmall, y: y - nodeRSmall, w: nodeRSmall * 2, h: nodeRSmall * 2,
+					hash: d.proof[i], label: 'Proof Hash [' + i + ']'
+				});
+			}
+		}
+
+		// Verification badge at bottom
+		const badgeY = H - 28;
+		ctx.fillStyle = d.verified ? '#22c55e' : '#f87171';
+		ctx.font = 'bold 12px system-ui'; ctx.textAlign = 'center';
+		ctx.fillText(
+			d.verified ? '\u2713 Consistency Verified \u2014 old tree is a prefix of the new tree'
+				: '\u2717 Verification Failed \u2014 trees are inconsistent',
+			W / 2, badgeY
+		);
+
+		// Footer info
+		ctx.fillStyle = '#475569'; ctx.font = '10px system-ui';
+		ctx.fillText('Old Size: ' + d.oldSize.toLocaleString() + '  |  New Size: ' + d.newSize.toLocaleString() +
+			'  |  Proof Depth: ' + proofLen + '  |  Tree Depth: ' + d.treeDepth, W / 2, H - 10);
+	}
+
+	function drawConsistencyNode(x, y, r, color, hash, label, highlight) {
+		if (highlight) {
+			ctx.beginPath(); ctx.arc(x, y, r + 5, 0, Math.PI * 2);
+			ctx.fillStyle = color + '15'; ctx.fill();
+		}
+		ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2);
+		ctx.fillStyle = color + '25'; ctx.fill();
+		ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke();
+		if (hash) {
+			ctx.fillStyle = '#e2e8f0'; ctx.font = 'bold 9px monospace'; ctx.textAlign = 'center';
+			ctx.fillText(hash.substring(0, 8) + '...', x, y + 3);
+		}
+		ctx.fillStyle = '#94a3b8'; ctx.font = '9px system-ui'; ctx.textAlign = 'center';
+		ctx.fillText(label, x, y + r + 14);
+	}
+
+	function renderConsistencyLegend() {
+		const items = [
+			{c:'#f59e0b', l:'Old Root Hash'},
+			{c:'#22c55e', l:'New Root Hash'},
+			{c:'#3b82f6', l:'Consistency Proof Hashes'},
+		];
+		document.getElementById('legendRow').innerHTML = items.map(i =>
+			'<div class="leg"><div class="leg-c" style="background:' + i.c + '"></div>' + i.l + '</div>'
+		).join('');
+	}
+
+	function renderConsistencySidePanel() {
+		const title = document.getElementById('sideTitle');
+		const content = document.getElementById('sideContent');
+		if (!consistencyData) {
+			title.textContent = 'Consistency Proof';
+			content.innerHTML = '<div style="color:#64748b;padding:20px;text-align:center">Select two tree sizes to verify consistency.</div>';
+			return;
+		}
+		const d = consistencyData;
+		title.textContent = 'Consistency Proof';
+
+		let html = '<div class="detail-card" style="border-left-color:' + (d.verified ? '#22c55e' : '#f87171') + '">' +
+			'<div class="domain">' + (d.verified ? '\u2713 Verified' : '\u2717 FAILED') + '</div>' +
+			'<div class="meta">' +
+			'Old Size: ' + d.oldSize.toLocaleString() + '<br>' +
+			'New Size: ' + d.newSize.toLocaleString() + '<br>' +
+			'Proof Hashes: ' + d.proofLen + '<br>' +
+			'Tree Growth: +' + (d.newSize - d.oldSize).toLocaleString() + ' entries</div></div>';
+
+		html += '<div class="detail-card" style="border-left-color:#f59e0b">' +
+			'<div style="font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Old Root (size ' + d.oldSize.toLocaleString() + ')</div>' +
+			'<div style="font-family:monospace;font-size:.68rem;color:#f59e0b;word-break:break-all">' + d.oldRoot + '</div></div>';
+
+		html += '<div class="detail-card" style="border-left-color:#22c55e">' +
+			'<div style="font-size:.72rem;color:#64748b;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">New Root (size ' + d.newSize.toLocaleString() + ')</div>' +
+			'<div style="font-family:monospace;font-size:.68rem;color:#22c55e;word-break:break-all">' + d.newRoot + '</div></div>';
+
+		if (d.proof.length) {
+			html += '<div style="margin:10px 0 6px;font-size:.78rem;color:#94a3b8;font-weight:600">Proof Hashes (' + d.proof.length + ')</div>';
+			d.proof.forEach((h, i) => {
+				html += '<div class="detail-card" style="border-left-color:#3b82f6;padding:8px 12px">' +
+					'<span style="color:#94a3b8;font-size:.7rem">Hash ' + i + '</span>' +
+					'<div style="font-family:monospace;font-size:.68rem;color:#60a5fa;word-break:break-all;margin-top:2px">' + h + '</div></div>';
+			});
+		}
+
+		html += '<div class="detail-card" style="border-left-color:#818cf8;margin-top:12px">' +
+			'<div class="domain">How It Works</div>' +
+			'<div class="meta">A consistency proof (RFC 9162 \u00a72.1.4) proves that the old tree ' +
+			'is a prefix of the new tree. The proof provides O(log n) intermediate hashes that allow ' +
+			'reconstructing both the old and new root hashes, proving no entries were modified or removed. ' +
+			'This is the append-only guarantee that makes transparency logs trustworthy.</div></div>';
+
+		content.innerHTML = html;
+	}
+
 	// ─── ACTIONS ───
 	function switchView(v) {
 		viewMode = v;
@@ -1358,20 +1661,27 @@ const vizExplorerHTML = `<!DOCTYPE html>
 		document.getElementById('tabTreemap').classList.toggle('active', v === 'treemap');
 		document.getElementById('tabProof').classList.toggle('active', v === 'proof');
 		document.getElementById('tabMerkle').classList.toggle('active', v === 'merkle');
+		document.getElementById('tabConsistency').classList.toggle('active', v === 'consistency');
 		// Show/hide controls per view
 		document.getElementById('proofControls').style.display = v === 'proof' ? 'flex' : 'none';
 		document.getElementById('merkleControls').style.display = v === 'merkle' ? 'flex' : 'none';
+		document.getElementById('consistencyControls').style.display = v === 'consistency' ? 'flex' : 'none';
 		document.getElementById('vizControls').style.display = (v === 'sunburst' || v === 'treemap') ? '' : 'none';
 		// Toggle canvas vs SVG container
 		canvas.style.display = v === 'merkle' ? 'none' : 'block';
 		document.getElementById('merkleSvgContainer').style.display = v === 'merkle' ? 'block' : 'none';
-		// Hide stats/breadcrumb for merkle view
-		document.getElementById('statsBar').style.display = v === 'merkle' ? 'none' : '';
-		document.getElementById('breadcrumb').style.display = v === 'merkle' ? 'none' : '';
+		// Hide stats/breadcrumb for merkle/consistency view
+		document.getElementById('statsBar').style.display = (v === 'merkle' || v === 'consistency') ? 'none' : '';
+		document.getElementById('breadcrumb').style.display = (v === 'merkle' || v === 'consistency') ? 'none' : '';
 		if (v === 'merkle') {
 			renderMerkleLegend();
 			if (!merkleSubtreeData) { loadMerkleSubtree(); }
 			else { renderMerkleTree(); renderMerkleSidePanel(); updateMerkleStatus(); }
+		} else if (v === 'consistency') {
+			renderConsistencyLegend();
+			loadCheckpoints();
+			redraw();
+			renderConsistencySidePanel();
 		} else {
 			redraw();
 		}
@@ -1652,7 +1962,7 @@ const vizExplorerHTML = `<!DOCTYPE html>
 		const params = new URLSearchParams(window.location.search);
 		const tab = params.get('tab');
 		const index = params.get('index');
-		if (tab && ['sunburst', 'treemap', 'proof', 'merkle'].includes(tab)) {
+		if (tab && ['sunburst', 'treemap', 'proof', 'merkle', 'consistency'].includes(tab)) {
 			switchView(tab);
 		}
 		if (index !== null && index !== '') {
@@ -1669,6 +1979,17 @@ const vizExplorerHTML = `<!DOCTYPE html>
 						if (info.algo) drillIntoByName(info.algo);
 					}
 				} catch (e) { console.warn('cert-info lookup failed:', e); }
+			}
+		}
+		if (tab === 'consistency') {
+			const oldParam = params.get('old');
+			const newParam = params.get('new');
+			if (oldParam && newParam) {
+				setTimeout(() => {
+					document.getElementById('oldSizeSelect').value = oldParam;
+					document.getElementById('newSizeSelect').value = newParam;
+					loadConsistencyProof();
+				}, 500);
 			}
 		}
 	})();

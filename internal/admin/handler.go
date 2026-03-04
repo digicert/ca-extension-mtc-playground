@@ -104,6 +104,9 @@ func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOri
 	h.mux.HandleFunc("GET /admin/viz/proof/{index}", h.handleVizProof)
 	h.mux.HandleFunc("GET /admin/viz/cert-info/{index}", h.handleVizCertInfo)
 	h.mux.HandleFunc("GET /admin/viz/subtree", h.handleVizSubtree)
+	h.mux.HandleFunc("GET /admin/viz/consistency", h.handleVizConsistency)
+	h.mux.HandleFunc("GET /admin/checkpoints/list", h.handleCheckpointsList)
+	h.mux.HandleFunc("GET /admin/consistency-proofs", h.handleRecentConsistencyProofs)
 
 	return h, nil
 }
@@ -142,6 +145,49 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	issuerStats := h.issuer.GetStats()
 
+	// Compute integrity data for initial page load.
+	ctx := r.Context()
+	var landmarkCount int64
+	if landmarks, err := h.store.ListLandmarks(ctx); err == nil {
+		landmarkCount = int64(len(landmarks))
+	}
+	proofDepth := 0
+	if stats.TreeSize > 1 {
+		proofDepth = bits.Len64(uint64(stats.TreeSize - 1))
+	}
+	verifyStatus := "N/A"
+	verifyClass := "text-gray-500"
+	verifyDetail := ""
+	verifyLinkOld := int64(0)
+	verifyLinkNew := int64(0)
+	if len(checkpoints) >= 2 {
+		newCp := checkpoints[0]
+		oldCp := checkpoints[1]
+		verifyLinkOld = oldCp.TreeSize
+		verifyLinkNew = newCp.TreeSize
+		nodeAt := func(level int, idx int64) merkle.Hash {
+			nd, err := h.store.GetTreeNode(ctx, level, idx)
+			if err != nil {
+				return merkle.EmptyHash
+			}
+			return nd
+		}
+		proof, err := merkle.ConsistencyProofFromNodes(oldCp.TreeSize, newCp.TreeSize, nodeAt)
+		if err == nil {
+			oldRoot := merkle.RootFromNodes(oldCp.TreeSize, nodeAt)
+			newRoot := merkle.RootFromNodes(newCp.TreeSize, nodeAt)
+			if merkle.VerifyConsistency(oldCp.TreeSize, newCp.TreeSize, proof, oldRoot, newRoot) {
+				verifyStatus = "Verified"
+				verifyClass = "text-green-600"
+				verifyDetail = fmt.Sprintf("size %d → %d (%d hashes)", oldCp.TreeSize, newCp.TreeSize, len(proof))
+			} else {
+				verifyStatus = "FAILED"
+				verifyClass = "text-red-600"
+				verifyDetail = fmt.Sprintf("size %d → %d", oldCp.TreeSize, newCp.TreeSize)
+			}
+		}
+	}
+
 	data := map[string]interface{}{
 		"Stats":          stats,
 		"Events":         events,
@@ -149,6 +195,13 @@ func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		"WatcherStats":   watcherStats,
 		"AssertionStats": assertionStats,
 		"IssuerStats":    issuerStats,
+		"LandmarkCount":  landmarkCount,
+		"ProofDepth":     proofDepth,
+		"VerifyStatus":   verifyStatus,
+		"VerifyClass":    verifyClass,
+		"VerifyDetail":   verifyDetail,
+		"VerifyLinkOld":  verifyLinkOld,
+		"VerifyLinkNew":  verifyLinkNew,
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -225,6 +278,71 @@ func (h *Handler) handleStats(w http.ResponseWriter, r *http.Request) {
 		assertionStats.PendingEntries,
 		lastGenerated,
 		lastRun,
+	)
+
+	// Log Integrity section
+	ctx := r.Context()
+	var landmarkCount int64
+	if landmarks, err := h.store.ListLandmarks(ctx); err == nil {
+		landmarkCount = int64(len(landmarks))
+	}
+
+	proofDepth := 0
+	if stats.TreeSize > 1 {
+		proofDepth = bits.Len64(uint64(stats.TreeSize - 1))
+	}
+
+	verifyStatus := "N/A"
+	verifyClass := "text-gray-500"
+	verifyDetail := ""
+	verifyLinkOld := int64(0)
+	verifyLinkNew := int64(0)
+
+	checkpoints, err := h.store.RecentCheckpoints(ctx, 2)
+	if err == nil && len(checkpoints) >= 2 {
+		newCp := checkpoints[0]
+		oldCp := checkpoints[1]
+		verifyLinkOld = oldCp.TreeSize
+		verifyLinkNew = newCp.TreeSize
+
+		nodeAt := func(level int, idx int64) merkle.Hash {
+			nd, err := h.store.GetTreeNode(ctx, level, idx)
+			if err != nil {
+				return merkle.EmptyHash
+			}
+			return nd
+		}
+
+		proof, err := merkle.ConsistencyProofFromNodes(oldCp.TreeSize, newCp.TreeSize, nodeAt)
+		if err == nil {
+			oldRoot := merkle.RootFromNodes(oldCp.TreeSize, nodeAt)
+			newRoot := merkle.RootFromNodes(newCp.TreeSize, nodeAt)
+			ok := merkle.VerifyConsistency(oldCp.TreeSize, newCp.TreeSize, proof, oldRoot, newRoot)
+			if ok {
+				verifyStatus = "Verified"
+				verifyClass = "text-green-600"
+				verifyDetail = fmt.Sprintf("size %d → %d (%d hashes)", oldCp.TreeSize, newCp.TreeSize, len(proof))
+			} else {
+				verifyStatus = "FAILED"
+				verifyClass = "text-red-600"
+				verifyDetail = fmt.Sprintf("size %d → %d", oldCp.TreeSize, newCp.TreeSize)
+			}
+		}
+	}
+
+	fmt.Fprintf(w, `<h2 class="text-lg font-semibold mb-4 mt-6">Log Integrity</h2>
+		<div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-6">
+			<div><p class="text-gray-500 text-sm">Proof Depth</p><p class="text-2xl font-bold">%d</p></div>
+			<div><p class="text-gray-500 text-sm">Landmarks</p><p class="text-2xl font-bold">%d</p></div>
+			<div><p class="text-gray-500 text-sm">Consistency</p><p class="text-2xl font-bold"><a href="/admin/viz?tab=consistency&old=%d&new=%d" class="%s hover:underline">%s</a></p></div>
+			<div><p class="text-gray-500 text-sm">Proof Range</p><p class="text-sm font-medium mt-1">1 → %d</p></div>
+			<div class="col-span-2"><p class="text-gray-500 text-sm">Last Verified</p><p class="text-sm font-medium mt-1">%s</p></div>
+		</div>`,
+		proofDepth,
+		landmarkCount,
+		verifyLinkOld, verifyLinkNew, verifyClass, verifyStatus,
+		stats.TreeSize,
+		verifyDetail,
 	)
 }
 
@@ -870,6 +988,166 @@ func (h *Handler) handleVizSubtree(w http.ResponseWriter, r *http.Request) {
 		SubtreeSize:    subtreeSize,
 		GlobalRootHash: hex.EncodeToString(cp.RootHash),
 		Levels:         levels,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// handleRecentConsistencyProofs renders HTML table rows of recent consistency proof events.
+func (h *Handler) handleRecentConsistencyProofs(w http.ResponseWriter, r *http.Request) {
+	events, err := h.store.RecentEventsByType(r.Context(), "consistency_proof", 10)
+	if err != nil {
+		h.logger.Error("admin: get consistency proof events", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	if len(events) == 0 {
+		fmt.Fprintf(w, `<tr><td colspan="4" class="px-2 py-4 text-center text-gray-400 text-sm">No consistency proofs generated yet</td></tr>`)
+		return
+	}
+
+	for _, ev := range events {
+		var payload struct {
+			OldSize     int64 `json:"old_size"`
+			NewSize     int64 `json:"new_size"`
+			ProofLength int   `json:"proof_length"`
+		}
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			continue
+		}
+		ts := ev.CreatedAt.Format("2006-01-02 15:04:05 UTC")
+		fmt.Fprintf(w, `<tr class="border-b">
+			<td class="px-2 py-1 font-mono text-sm">%d</td>
+			<td class="px-2 py-1 font-mono text-sm">%d</td>
+			<td class="px-2 py-1 text-sm">%d</td>
+			<td class="px-2 py-1 text-xs text-gray-500">%s</td>
+		</tr>`, payload.OldSize, payload.NewSize, payload.ProofLength, ts)
+	}
+}
+
+// handleCheckpointsList returns a JSON array of recent checkpoints for dropdown population.
+func (h *Handler) handleCheckpointsList(w http.ResponseWriter, r *http.Request) {
+	checkpoints, err := h.store.RecentCheckpoints(r.Context(), 20)
+	if err != nil {
+		h.logger.Error("admin: list checkpoints", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	type cpJSON struct {
+		ID       int64  `json:"id"`
+		TreeSize int64  `json:"treeSize"`
+		RootHash string `json:"rootHash"`
+		Time     string `json:"time"`
+	}
+
+	result := make([]cpJSON, len(checkpoints))
+	for i, cp := range checkpoints {
+		rootHex := ""
+		if len(cp.RootHash) > 8 {
+			rootHex = hex.EncodeToString(cp.RootHash[:8])
+		} else {
+			rootHex = hex.EncodeToString(cp.RootHash)
+		}
+		result[i] = cpJSON{
+			ID:       cp.ID,
+			TreeSize: cp.TreeSize,
+			RootHash: rootHex,
+			Time:     cp.CreatedAt.Format("2006-01-02 15:04:05"),
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+// handleVizConsistency generates a consistency proof with verification result for the viz tab.
+func (h *Handler) handleVizConsistency(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	oldParam := r.URL.Query().Get("old")
+	newParam := r.URL.Query().Get("new")
+	if oldParam == "" || newParam == "" {
+		http.Error(w, "missing 'old' and 'new' query parameters", http.StatusBadRequest)
+		return
+	}
+
+	oldSize, err := strconv.ParseInt(oldParam, 10, 64)
+	if err != nil || oldSize < 1 {
+		http.Error(w, "invalid 'old' parameter", http.StatusBadRequest)
+		return
+	}
+	newSize, err := strconv.ParseInt(newParam, 10, 64)
+	if err != nil || newSize < 1 {
+		http.Error(w, "invalid 'new' parameter", http.StatusBadRequest)
+		return
+	}
+	if oldSize > newSize {
+		http.Error(w, "'old' must be <= 'new'", http.StatusBadRequest)
+		return
+	}
+
+	stats, err := h.store.GetStats(ctx)
+	if err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	if newSize > stats.TreeSize {
+		http.Error(w, fmt.Sprintf("'new' (%d) exceeds tree size (%d)", newSize, stats.TreeSize), http.StatusBadRequest)
+		return
+	}
+
+	nodeAt := func(level int, idx int64) merkle.Hash {
+		nd, err := h.store.GetTreeNode(ctx, level, idx)
+		if err != nil {
+			return merkle.EmptyHash
+		}
+		return nd
+	}
+
+	proof, err := merkle.ConsistencyProofFromNodes(oldSize, newSize, nodeAt)
+	if err != nil {
+		h.logger.Error("admin: consistency proof", "error", err)
+		http.Error(w, "failed to compute proof", http.StatusInternalServerError)
+		return
+	}
+
+	oldRoot := merkle.RootFromNodes(oldSize, nodeAt)
+	newRoot := merkle.RootFromNodes(newSize, nodeAt)
+	verified := merkle.VerifyConsistency(oldSize, newSize, proof, oldRoot, newRoot)
+
+	proofHex := make([]string, len(proof))
+	for i, ph := range proof {
+		proofHex[i] = hex.EncodeToString(ph[:])
+	}
+
+	treeDepth := 0
+	if newSize > 1 {
+		treeDepth = bits.Len64(uint64(newSize - 1))
+	}
+
+	resp := struct {
+		OldSize   int64    `json:"oldSize"`
+		NewSize   int64    `json:"newSize"`
+		OldRoot   string   `json:"oldRoot"`
+		NewRoot   string   `json:"newRoot"`
+		Proof     []string `json:"proof"`
+		ProofLen  int      `json:"proofLen"`
+		Verified  bool     `json:"verified"`
+		TreeDepth int      `json:"treeDepth"`
+	}{
+		OldSize:   oldSize,
+		NewSize:   newSize,
+		OldRoot:   hex.EncodeToString(oldRoot[:]),
+		NewRoot:   hex.EncodeToString(newRoot[:]),
+		Proof:     proofHex,
+		ProofLen:  len(proof),
+		Verified:  verified,
+		TreeDepth: treeDepth,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

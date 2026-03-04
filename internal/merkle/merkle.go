@@ -366,6 +366,122 @@ func inclusionProofFromNodes(index, start, end int64, level int, nodeAt func(int
 	return proof
 }
 
+// ConsistencyProofFromNodes computes a consistency proof using precomputed tree
+// node hashes instead of recomputing from raw leaves. The nodeAt callback
+// returns the stored hash at (level, index). This is O(log₂ n) node
+// retrievals vs O(n) for ConsistencyProof with leaf-level hashAt.
+func ConsistencyProofFromNodes(oldSize, newSize int64, nodeAt func(level int, idx int64) Hash) ([]Hash, error) {
+	if oldSize < 0 || oldSize > newSize {
+		return nil, fmt.Errorf("merkle.ConsistencyProofFromNodes: invalid sizes old=%d new=%d", oldSize, newSize)
+	}
+	if oldSize == 0 {
+		return nil, nil
+	}
+	if oldSize == newSize {
+		return nil, nil
+	}
+	return consistencyProofFromNodes(oldSize, newSize, 0, 0, true, nodeAt), nil
+}
+
+func consistencyProofFromNodes(m, n int64, start int64, level int, openRight bool, nodeAt func(int, int64) Hash) []Hash {
+	end := start + n
+	if m == n {
+		if openRight {
+			return nil
+		}
+		return []Hash{subtreeHashFromNodes(start, end, level, nodeAt)}
+	}
+	k := int64(splitPoint(int(n)))
+	if m <= k {
+		proof := consistencyProofFromNodes(m, k, start, level, openRight, nodeAt)
+		proof = append(proof, subtreeHashFromNodes(start+k, end, level, nodeAt))
+		return proof
+	}
+	proof := consistencyProofFromNodes(m-k, n-k, start+k, level, false, nodeAt)
+	proof = append(proof, subtreeHashFromNodes(start, start+k, level, nodeAt))
+	return proof
+}
+
+// VerifyConsistency verifies a consistency proof between oldSize and newSize
+// per RFC 9162 §2.1.4.2. Returns true if the proof correctly connects oldRoot
+// to newRoot, proving the old tree is a prefix of the new tree.
+//
+// The verification mirrors the SUBPROOF generation structure: it recursively
+// decomposes the proof, reconstructing both the old and new root hashes
+// simultaneously from the proof elements.
+func VerifyConsistency(oldSize, newSize int64, proof []Hash, oldRoot, newRoot Hash) bool {
+	if oldSize > newSize || oldSize < 0 || newSize < 0 {
+		return false
+	}
+	if oldSize == newSize {
+		return len(proof) == 0 && oldRoot == newRoot
+	}
+	if oldSize == 0 {
+		return len(proof) == 0
+	}
+	if len(proof) == 0 {
+		return false
+	}
+
+	pIdx := 0
+	oh, nh, ok := verifyConsistencyRec(oldSize, newSize, true, oldRoot, proof, &pIdx)
+	return ok && pIdx == len(proof) && oh == oldRoot && nh == newRoot
+}
+
+// verifyConsistencyRec mirrors the consistencyProof recursive structure.
+// It returns (oldSubtreeHash, newSubtreeHash, ok). When openRight is true and
+// m==n, the passThrough value (old root at that level) is used directly since
+// no proof element is consumed.
+func verifyConsistencyRec(m, n int64, openRight bool, passThrough Hash, proof []Hash, pIdx *int) (Hash, Hash, bool) {
+	if m == n {
+		if openRight {
+			// Subtree fully covered by old tree at its right edge.
+			// No proof element consumed; hash equals the old root at this level.
+			return passThrough, passThrough, true
+		}
+		if *pIdx >= len(proof) {
+			return Hash{}, Hash{}, false
+		}
+		h := proof[*pIdx]
+		*pIdx++
+		return h, h, true
+	}
+	k := int64(splitPoint(int(n)))
+	if m <= k {
+		// Old tree fits in left subtree; right subtree hash from proof.
+		oldH, newLeftH, ok := verifyConsistencyRec(m, k, openRight, passThrough, proof, pIdx)
+		if !ok {
+			return Hash{}, Hash{}, false
+		}
+		if *pIdx >= len(proof) {
+			return Hash{}, Hash{}, false
+		}
+		rightH := proof[*pIdx]
+		*pIdx++
+		return oldH, InteriorHash(newLeftH, rightH), true
+	}
+	// Old tree extends into right subtree; left subtree hash from proof.
+	oldRightH, newRightH, ok := verifyConsistencyRec(m-k, n-k, false, Hash{}, proof, pIdx)
+	if !ok {
+		return Hash{}, Hash{}, false
+	}
+	if *pIdx >= len(proof) {
+		return Hash{}, Hash{}, false
+	}
+	leftH := proof[*pIdx]
+	*pIdx++
+	return InteriorHash(leftH, oldRightH), InteriorHash(leftH, newRightH), true
+}
+
+// RootFromNodes computes the root hash for a tree of the given size using
+// precomputed tree nodes. Returns the empty hash for size <= 0.
+func RootFromNodes(size int64, nodeAt func(level int, idx int64) Hash) Hash {
+	if size <= 0 {
+		return sha256.Sum256(nil)
+	}
+	return subtreeHashFromNodes(0, size, 0, nodeAt)
+}
+
 // subtreeHashFromNodes computes the Merkle hash for [start, end) at the given
 // base level using precomputed nodes. For complete power-of-two subtrees, it
 // reads a single stored node. For right-edge partial subtrees, it recurses.

@@ -1099,6 +1099,27 @@ func (s *Store) RecentEvents(ctx context.Context, limit int) ([]*Event, error) {
 	return events, rows.Err()
 }
 
+// RecentEventsByType returns the most recent n events of a given type.
+func (s *Store) RecentEventsByType(ctx context.Context, eventType string, limit int) ([]*Event, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, event_type, payload, created_at
+		 FROM events WHERE event_type = $1 ORDER BY id DESC LIMIT $2`, eventType, limit)
+	if err != nil {
+		return nil, fmt.Errorf("store.RecentEventsByType: %w", err)
+	}
+	defer rows.Close()
+
+	var events []*Event
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.ID, &e.EventType, &e.Payload, &e.CreatedAt); err != nil {
+			return nil, fmt.Errorf("store.RecentEventsByType: scan: %w", err)
+		}
+		events = append(events, &e)
+	}
+	return events, rows.Err()
+}
+
 // EventsSince returns events with ID > sinceID.
 func (s *Store) EventsSince(ctx context.Context, sinceID int64) ([]*Event, error) {
 	rows, err := s.db.QueryContext(ctx,

@@ -451,3 +451,225 @@ func TestInclusionProofFromNodesBoundary(t *testing.T) {
 		t.Error("expected error for zero size")
 	}
 }
+
+// buildTreeNodes constructs a Merkle tree and returns leaf hashes, interior node
+// storage, and a nodeAt callback suitable for *FromNodes functions.
+func buildTreeNodes(size int) ([]Hash, func(int, int64) Hash) {
+	entries := make([][]byte, size)
+	leafHashes := make([]Hash, size)
+	for i := range entries {
+		entries[i] = []byte(fmt.Sprintf("entry-%d", i))
+		leafHashes[i] = LeafHash(entries[i])
+	}
+
+	nodes := make(map[int]map[int64]Hash)
+	storeNode := func(level int, idx int64, h Hash) {
+		if nodes[level] == nil {
+			nodes[level] = make(map[int64]Hash)
+		}
+		nodes[level][idx] = h
+	}
+
+	for i, lh := range leafHashes {
+		storeNode(0, int64(i), lh)
+	}
+
+	levelSize := int64(size)
+	for level := 0; levelSize > 1; level++ {
+		nextSize := (levelSize + 1) / 2
+		for i := int64(0); i < levelSize/2; i++ {
+			left := nodes[level][i*2]
+			right := nodes[level][i*2+1]
+			storeNode(level+1, i, InteriorHash(left, right))
+		}
+		levelSize = nextSize
+	}
+
+	nodeAt := func(level int, idx int64) Hash {
+		if m, ok := nodes[level]; ok {
+			if h, ok := m[idx]; ok {
+				return h
+			}
+		}
+		return Hash{}
+	}
+
+	return leafHashes, nodeAt
+}
+
+func TestConsistencyProofFromNodes(t *testing.T) {
+	for _, size := range []int{2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 100} {
+		leafHashes, nodeAt := buildTreeNodes(size)
+		hashAt := func(i int64) Hash { return leafHashes[i] }
+
+		for oldSize := int64(1); oldSize < int64(size); oldSize++ {
+			proofLeaf, err := ConsistencyProof(oldSize, int64(size), hashAt)
+			if err != nil {
+				t.Fatalf("size=%d old=%d ConsistencyProof: %v", size, oldSize, err)
+			}
+			proofNode, err := ConsistencyProofFromNodes(oldSize, int64(size), nodeAt)
+			if err != nil {
+				t.Fatalf("size=%d old=%d ConsistencyProofFromNodes: %v", size, oldSize, err)
+			}
+
+			if len(proofLeaf) != len(proofNode) {
+				t.Errorf("size=%d old=%d proof length mismatch: leaf=%d node=%d",
+					size, oldSize, len(proofLeaf), len(proofNode))
+				continue
+			}
+			for i := range proofLeaf {
+				if proofLeaf[i] != proofNode[i] {
+					t.Errorf("size=%d old=%d proof[%d] mismatch", size, oldSize, i)
+				}
+			}
+		}
+	}
+}
+
+func TestConsistencyProofFromNodesEdgeCases(t *testing.T) {
+	_, nodeAt := buildTreeNodes(5)
+
+	// 0 to n: empty proof
+	proof, err := ConsistencyProofFromNodes(0, 5, nodeAt)
+	if err != nil {
+		t.Fatalf("ConsistencyProofFromNodes(0, 5): %v", err)
+	}
+	if len(proof) != 0 {
+		t.Errorf("expected empty proof for old=0, got %d elements", len(proof))
+	}
+
+	// n to n: empty proof
+	proof, err = ConsistencyProofFromNodes(5, 5, nodeAt)
+	if err != nil {
+		t.Fatalf("ConsistencyProofFromNodes(5, 5): %v", err)
+	}
+	if len(proof) != 0 {
+		t.Errorf("expected empty proof for old=new, got %d elements", len(proof))
+	}
+
+	// invalid: old > new
+	_, err = ConsistencyProofFromNodes(6, 5, nodeAt)
+	if err == nil {
+		t.Error("expected error for old > new")
+	}
+
+	// single element tree: 1 to 1
+	_, nodeAt1 := buildTreeNodes(1)
+	proof, err = ConsistencyProofFromNodes(1, 1, nodeAt1)
+	if err != nil {
+		t.Fatalf("ConsistencyProofFromNodes(1, 1): %v", err)
+	}
+	if len(proof) != 0 {
+		t.Errorf("expected empty proof for 1-to-1, got %d elements", len(proof))
+	}
+}
+
+func TestVerifyConsistency(t *testing.T) {
+	for _, newSize := range []int{2, 3, 4, 5, 7, 8, 9, 15, 16, 17, 50} {
+		entries := make([][]byte, newSize)
+		for i := range entries {
+			entries[i] = []byte(fmt.Sprintf("entry-%d", i))
+		}
+
+		newRoot := MTH(entries)
+
+		for oldSize := int64(1); oldSize < int64(newSize); oldSize++ {
+			oldRoot := MTH(entries[:oldSize])
+
+			hashes := make([]Hash, newSize)
+			for i, e := range entries {
+				hashes[i] = LeafHash(e)
+			}
+			hashAt := func(i int64) Hash { return hashes[i] }
+
+			proof, err := ConsistencyProof(oldSize, int64(newSize), hashAt)
+			if err != nil {
+				t.Fatalf("new=%d old=%d ConsistencyProof: %v", newSize, oldSize, err)
+			}
+
+			if !VerifyConsistency(oldSize, int64(newSize), proof, oldRoot, newRoot) {
+				t.Errorf("VerifyConsistency(old=%d, new=%d) = false, want true (proof len=%d)",
+					oldSize, newSize, len(proof))
+			}
+		}
+	}
+}
+
+func TestVerifyConsistencyRejectsInvalid(t *testing.T) {
+	entries := [][]byte{[]byte("a"), []byte("b"), []byte("c"), []byte("d"), []byte("e")}
+	hashes := make([]Hash, len(entries))
+	for i, e := range entries {
+		hashes[i] = LeafHash(e)
+	}
+	hashAt := func(i int64) Hash { return hashes[i] }
+
+	oldRoot := MTH(entries[:3])
+	newRoot := MTH(entries)
+
+	proof, err := ConsistencyProof(3, 5, hashAt)
+	if err != nil {
+		t.Fatalf("ConsistencyProof(3, 5): %v", err)
+	}
+
+	// Valid proof should pass.
+	if !VerifyConsistency(3, 5, proof, oldRoot, newRoot) {
+		t.Fatal("valid proof rejected")
+	}
+
+	// Tampered proof: flip a byte.
+	tampered := make([]Hash, len(proof))
+	copy(tampered, proof)
+	tampered[0][0] ^= 0xff
+	if VerifyConsistency(3, 5, tampered, oldRoot, newRoot) {
+		t.Error("tampered proof accepted")
+	}
+
+	// Wrong old root.
+	wrongRoot := Hash{0x42}
+	if VerifyConsistency(3, 5, proof, wrongRoot, newRoot) {
+		t.Error("wrong old root accepted")
+	}
+
+	// Wrong new root.
+	if VerifyConsistency(3, 5, proof, oldRoot, wrongRoot) {
+		t.Error("wrong new root accepted")
+	}
+
+	// Swapped sizes.
+	if VerifyConsistency(5, 3, proof, oldRoot, newRoot) {
+		t.Error("old > new accepted")
+	}
+
+	// Empty proof for non-trivial case.
+	if VerifyConsistency(3, 5, nil, oldRoot, newRoot) {
+		t.Error("empty proof accepted for old < new")
+	}
+
+	// Same size requires matching roots and no proof.
+	if !VerifyConsistency(5, 5, nil, newRoot, newRoot) {
+		t.Error("same-size same-root rejected")
+	}
+	if VerifyConsistency(5, 5, nil, oldRoot, newRoot) {
+		t.Error("same-size different-root accepted")
+	}
+	if VerifyConsistency(5, 5, proof, newRoot, newRoot) {
+		t.Error("same-size with non-empty proof accepted")
+	}
+}
+
+func TestRootFromNodes(t *testing.T) {
+	for _, size := range []int{1, 2, 3, 4, 5, 7, 8, 16, 17, 50} {
+		entries := make([][]byte, size)
+		for i := range entries {
+			entries[i] = []byte(fmt.Sprintf("entry-%d", i))
+		}
+
+		_, nodeAt := buildTreeNodes(size)
+		expectedRoot := MTH(entries)
+
+		got := RootFromNodes(int64(size), nodeAt)
+		if got != expectedRoot {
+			t.Errorf("RootFromNodes(%d) = %x, want %x", size, got, expectedRoot)
+		}
+	}
+}

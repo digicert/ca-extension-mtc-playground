@@ -45,6 +45,7 @@ X.509 extensions is also available for backward compatibility.
 | C2SP tlog-tiles HTTP API | [tlog-tiles](https://c2sp.org/tlog-tiles) | `/checkpoint`, `/tile/<L>/<N>`, `/tile/entries/<N>` |
 | Signed checkpoints | [C2SP signed-note](https://c2sp.org/signed-note) | Ed25519 signatures in signed-note format |
 | Inclusion proofs | RFC 9162 §2.1.3 | `GET /proof/inclusion?serial=<hex>` endpoint |
+| **Consistency proofs** | RFC 9162 §2.1.4 | `GET /proof/consistency?old=M&new=N` — append-only audit |
 | Revocation tracking | MTC §5.7 | Revocation-by-index bitfield, polled from CA database |
 | Cosigner signing | MTC §5.5 | Ed25519 + ML-DSA-44/65/87 key pairs for checkpoints and subtrees |
 | Null entry at index 0 | MTC §5.3 | Sentinel entry per spec |
@@ -80,7 +81,6 @@ X.509 extensions is also available for backward compatibility.
 | External cosigner protocol | MTC §5.5 | Requires distributed coordination infrastructure |
 | TLS 1.3 custom extension | MTC §6 | Go `crypto/tls` does not support custom extensions; demo uses SCT field |
 | Browser relying-party logic | MTC §8 | Requires browser/client-side implementation |
-| Consistency proofs | RFC 9162 §2.1.4 | Not yet implemented (inclusion proofs only) |
 
 ---
 
@@ -404,7 +404,7 @@ for details.
 - **In-memory nonce store** with TTL cleanup.
 - **Database**: 4 new ACME tables, 6 indexes, ~16 CRUD methods.
 - **Config**: `ACMEConfig` with 12 fields, sensible defaults.
-- **Conformance**: 6 ACME tests + 3 MTC-spec tests (26 total), all passing — including full MTC flow with real CA.
+- **Conformance**: 6 ACME tests + 3 MTC-spec tests + 3 consistency proof tests (29 total), all passing — including full MTC flow with real CA.
 
 ### How to Demonstrate
 
@@ -440,7 +440,7 @@ for details.
    ```bash
    ./bin/mtc-conformance -url http://localhost:8080 -acme-url https://localhost:8443 -verbose
    ```
-   - All 26 tests should pass, including 6 ACME tests and 3 MTC-spec tests.
+   - All 29 tests should pass, including 6 ACME tests, 3 MTC-spec tests, and 3 consistency proof tests.
 
    Or run all tests with:
    ```bash
@@ -1074,8 +1074,11 @@ Target: http://localhost:8080
   mtc_cert_format                [PASS]
   mtc_proof_roundtrip            [PASS]
   mtc_log_entry_reconstruct      [PASS]
+  consistency_proof_api          [PASS]
+  consistency_proof_verify       [PASS]
+  consistency_proof_edge_cases   [PASS]
 
-Results: 26 passed, 0 failed, 0 skipped
+Results: 29 passed, 0 failed, 0 skipped
 ```
 
 ### Step 15 — ACME Server: Directory & Nonce
@@ -1151,6 +1154,7 @@ inclusion proof → certificate download with MTC assertion bundle attached.
 | GET | `/tile/<L>/<N>` | Merkle hash tile at level L, index N |
 | GET | `/tile/entries/<N>` | Entry bundle tile at index N |
 | GET | `/proof/inclusion?serial=<hex>[&index=<n>]` | Inclusion proof for a certificate by serial number |
+| GET | `/proof/consistency?old=M&new=N` | Consistency proof between two tree sizes (RFC 9162 §2.1.4) |
 | GET | `/assertion/{query}` | Assertion bundle as JSON (query by index or serial hex) |
 | GET | `/assertion/{query}/pem` | Assertion bundle in PEM-like text format |
 | GET | `/assertions/pending?since=<id>&limit=N` | Pre-computed bundles since a checkpoint (polling) |
@@ -1279,7 +1283,7 @@ to fetch the full bundle.
 ```
 cmd/
   mtc-bridge/          Main service binary
-  mtc-conformance/     Conformance test client (26 tests, including MTC-spec)
+  mtc-conformance/     Conformance test client (29 tests, including MTC-spec)
   mtc-assertion/       CLI tool: fetch, verify, inspect assertion bundles
   mtc-tls-server/      Demo TLS server with MTC assertion stapling (MTC-spec + legacy)
   mtc-tls-verify/      TLS verification client — auto-detects MTC-spec vs legacy certs
@@ -1344,7 +1348,7 @@ the full list).
 # Unit tests (60+ tests across merkle, config, cosigner, certutil, tlogtiles, localca, mtccert, mtcformat packages)
 make test
 
-# Conformance tests (26 tests including MTC-spec, requires a running mtc-bridge instance)
+# Conformance tests (29 tests including MTC-spec, requires a running mtc-bridge instance)
 make conformance
 
 # Go vet
@@ -1507,7 +1511,7 @@ MTC_CADB_DATABASE=digicert_ca
    make build
    ./bin/mtc-conformance -url http://localhost:8080 -acme-url https://localhost:8443 -verbose
    ```
-   All 26 tests pass, including `acme_full_mtc_flow` which exercises the complete pipeline.
+   All 29 tests pass, including `acme_full_mtc_flow` which exercises the complete pipeline.
 5. Or run the end-to-end demo script:
    ```bash
    ./demo-e2e.sh

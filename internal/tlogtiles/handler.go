@@ -15,6 +15,7 @@
 //   - GET /revocation                 — revocation bitmap (extension)
 //   - GET /proof/inclusion?serial=X   — inclusion proof for certificate by serial
 //   - GET /proof/inclusion?index=N    — inclusion proof for certificate by log index
+//   - GET /proof/consistency?old=M&new=N — consistency proof between tree sizes M and N
 //
 // Tile path encoding follows C2SP spec: tile indices are encoded as
 // zero-padded 3-digit "x"-prefixed path segments.
@@ -61,6 +62,7 @@ func New(s *store.Store, revMgr *revocation.Manager, logOrigin string, logger *s
 	h.mux.HandleFunc("GET /tile/", h.handleTile)
 	h.mux.HandleFunc("GET /revocation", h.handleRevocation)
 	h.mux.HandleFunc("GET /proof/inclusion", h.handleInclusionProof)
+	h.mux.HandleFunc("GET /proof/consistency", h.handleConsistencyProof)
 	h.mux.HandleFunc("GET /assertion/{query}", h.handleAssertion)
 	h.mux.HandleFunc("GET /assertion/{query}/pem", h.handleAssertionPEM)
 	h.mux.HandleFunc("GET /assertions/pending", h.handleAssertionsPending)
@@ -342,6 +344,104 @@ func (h *Handler) handleInclusionProof(w http.ResponseWriter, r *http.Request) {
 		RootHash:   hex.EncodeToString(cp.RootHash),
 		Checkpoint: cp.Body,
 	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	json.NewEncoder(w).Encode(resp)
+}
+
+// ConsistencyProofResponse is the JSON response for the consistency proof API.
+type ConsistencyProofResponse struct {
+	OldSize    int64    `json:"old_size"`
+	NewSize    int64    `json:"new_size"`
+	OldRoot    string   `json:"old_root"`
+	NewRoot    string   `json:"new_root"`
+	Proof      []string `json:"proof"`
+	Checkpoint string   `json:"checkpoint"`
+}
+
+// handleConsistencyProof serves consistency proofs between two tree sizes.
+func (h *Handler) handleConsistencyProof(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	oldParam := r.URL.Query().Get("old")
+	newParam := r.URL.Query().Get("new")
+
+	if oldParam == "" || newParam == "" {
+		http.Error(w, "missing 'old' and 'new' query parameters", http.StatusBadRequest)
+		return
+	}
+
+	oldSize, err := strconv.ParseInt(oldParam, 10, 64)
+	if err != nil || oldSize < 1 {
+		http.Error(w, "invalid 'old' parameter: must be a positive integer", http.StatusBadRequest)
+		return
+	}
+
+	newSize, err := strconv.ParseInt(newParam, 10, 64)
+	if err != nil || newSize < 1 {
+		http.Error(w, "invalid 'new' parameter: must be a positive integer", http.StatusBadRequest)
+		return
+	}
+
+	if oldSize > newSize {
+		http.Error(w, "'old' must be <= 'new'", http.StatusBadRequest)
+		return
+	}
+
+	// Get latest checkpoint to bound newSize.
+	cp, err := h.store.LatestCheckpoint(ctx)
+	if err != nil {
+		h.logger.Error("consistency proof: latest checkpoint", "error", err)
+		http.Error(w, "no checkpoint available", http.StatusServiceUnavailable)
+		return
+	}
+
+	if newSize > cp.TreeSize {
+		http.Error(w, fmt.Sprintf("'new' (%d) exceeds tree size (%d)", newSize, cp.TreeSize), http.StatusBadRequest)
+		return
+	}
+
+	// Build nodeAt callback from stored tree nodes.
+	nodeAt := func(level int, idx int64) merkle.Hash {
+		h, err := h.store.GetTreeNode(ctx, level, idx)
+		if err != nil {
+			return merkle.EmptyHash
+		}
+		return h
+	}
+
+	proof, err := merkle.ConsistencyProofFromNodes(oldSize, newSize, nodeAt)
+	if err != nil {
+		h.logger.Error("consistency proof: compute", "error", err, "old", oldSize, "new", newSize)
+		http.Error(w, "failed to compute proof", http.StatusInternalServerError)
+		return
+	}
+
+	// Compute root hashes for both sizes from stored nodes.
+	oldRoot := merkle.RootFromNodes(oldSize, nodeAt)
+	newRoot := merkle.RootFromNodes(newSize, nodeAt)
+
+	proofHex := make([]string, len(proof))
+	for i, ph := range proof {
+		proofHex[i] = hex.EncodeToString(ph[:])
+	}
+
+	resp := ConsistencyProofResponse{
+		OldSize:    oldSize,
+		NewSize:    newSize,
+		OldRoot:    hex.EncodeToString(oldRoot[:]),
+		NewRoot:    hex.EncodeToString(newRoot[:]),
+		Proof:      proofHex,
+		Checkpoint: cp.Body,
+	}
+
+	// Record the consistency proof event for admin dashboard visibility.
+	_ = h.store.EmitEvent(ctx, "consistency_proof", map[string]interface{}{
+		"old_size":     oldSize,
+		"new_size":     newSize,
+		"proof_length": len(proof),
+	})
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-cache")

@@ -96,6 +96,9 @@ func main() {
 		{"acme_new_order", c.testACMENewOrder},
 		{"acme_order_flow", c.testACMEOrderFlow},
 		{"acme_full_mtc_flow", c.testACMEFullMTCFlow},
+		{"consistency_proof_api", c.testConsistencyProofAPI},
+		{"consistency_proof_verify", c.testConsistencyProofVerify},
+		{"consistency_proof_edge_cases", c.testConsistencyProofEdgeCases},
 		{"mtc_cert_format", c.testMTCCertFormat},
 		{"mtc_proof_roundtrip", c.testMTCProofRoundtrip},
 		{"mtc_log_entry_reconstruct", c.testMTCLogEntryReconstruct},
@@ -1507,6 +1510,258 @@ func (c *conformanceClient) testMTCProofRoundtrip() error {
 	}
 	if parsed.Signatures[0].CosignerID != 0 || parsed.Signatures[1].CosignerID != 1 {
 		return fmt.Errorf("cosigner IDs mismatch")
+	}
+
+	return nil
+}
+
+func (c *conformanceClient) testConsistencyProofAPI() error {
+	if c.treeSize < 2 {
+		return errSkipped
+	}
+
+	// Fetch a consistency proof from size 1 to current tree size.
+	body, status, err := c.get(fmt.Sprintf("/proof/consistency?old=1&new=%d", c.treeSize))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("expected 200, got %d: %s", status, string(body))
+	}
+
+	var resp struct {
+		OldSize    int64    `json:"old_size"`
+		NewSize    int64    `json:"new_size"`
+		OldRoot    string   `json:"old_root"`
+		NewRoot    string   `json:"new_root"`
+		Proof      []string `json:"proof"`
+		Checkpoint string   `json:"checkpoint"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	if resp.OldSize != 1 {
+		return fmt.Errorf("old_size = %d, want 1", resp.OldSize)
+	}
+	if resp.NewSize != c.treeSize {
+		return fmt.Errorf("new_size = %d, want %d", resp.NewSize, c.treeSize)
+	}
+	if len(resp.OldRoot) != 64 {
+		return fmt.Errorf("old_root length = %d, want 64 hex chars", len(resp.OldRoot))
+	}
+	if len(resp.NewRoot) != 64 {
+		return fmt.Errorf("new_root length = %d, want 64 hex chars", len(resp.NewRoot))
+	}
+	if resp.Checkpoint == "" {
+		return fmt.Errorf("empty checkpoint")
+	}
+	if len(resp.Proof) == 0 {
+		return fmt.Errorf("empty proof for old=1, new=%d", c.treeSize)
+	}
+
+	// Verify all proof hashes are 32 bytes (64 hex chars).
+	for i, ph := range resp.Proof {
+		if len(ph) != 64 {
+			return fmt.Errorf("proof[%d] length = %d, want 64 hex chars", i, len(ph))
+		}
+		if _, err := hex.DecodeString(ph); err != nil {
+			return fmt.Errorf("proof[%d] invalid hex: %w", i, err)
+		}
+	}
+
+	return nil
+}
+
+func (c *conformanceClient) testConsistencyProofVerify() error {
+	if c.treeSize < 3 {
+		return errSkipped
+	}
+
+	// Use old=1, new=treeSize for verification.
+	body, status, err := c.get(fmt.Sprintf("/proof/consistency?old=1&new=%d", c.treeSize))
+	if err != nil {
+		return fmt.Errorf("request failed: %w", err)
+	}
+	if status != 200 {
+		return fmt.Errorf("expected 200, got %d: %s", status, string(body))
+	}
+
+	var resp struct {
+		OldSize    int64    `json:"old_size"`
+		NewSize    int64    `json:"new_size"`
+		OldRoot    string   `json:"old_root"`
+		NewRoot    string   `json:"new_root"`
+		Proof      []string `json:"proof"`
+		Checkpoint string   `json:"checkpoint"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return fmt.Errorf("invalid JSON: %w", err)
+	}
+
+	// Decode hashes.
+	oldRoot, err := hex.DecodeString(resp.OldRoot)
+	if err != nil {
+		return fmt.Errorf("invalid old_root hex: %w", err)
+	}
+	newRoot, err := hex.DecodeString(resp.NewRoot)
+	if err != nil {
+		return fmt.Errorf("invalid new_root hex: %w", err)
+	}
+
+	proofHashes := make([][]byte, len(resp.Proof))
+	for i, ph := range resp.Proof {
+		proofHashes[i], err = hex.DecodeString(ph)
+		if err != nil {
+			return fmt.Errorf("proof[%d] invalid hex: %w", i, err)
+		}
+	}
+
+	// Verify: the new root from the proof should match the checkpoint root.
+	// Also verify against the checkpoint's root hash.
+	if len(c.rootHash) > 0 {
+		for i := range newRoot {
+			if newRoot[i] != c.rootHash[i] {
+				return fmt.Errorf("new_root mismatch with checkpoint root at byte %d", i)
+			}
+		}
+	}
+
+	// Cryptographic verification: reconstruct both roots using the recursive
+	// SUBPROOF verification algorithm (mirrors the proof generation structure).
+	ok := verifyConsistencyProof(resp.OldSize, resp.NewSize, proofHashes, oldRoot, newRoot)
+	if !ok {
+		return fmt.Errorf("consistency proof verification failed for old=%d new=%d (proof len=%d)",
+			resp.OldSize, resp.NewSize, len(proofHashes))
+	}
+
+	return nil
+}
+
+// verifyConsistencyProof implements RFC 9162 §2.1.4.2 consistency proof verification.
+// It mirrors the SUBPROOF generation structure to reconstruct both old and new roots.
+func verifyConsistencyProof(oldSize, newSize int64, proof [][]byte, oldRoot, newRoot []byte) bool {
+	if oldSize == newSize {
+		return len(proof) == 0 && bytesEqual(oldRoot, newRoot)
+	}
+	if oldSize == 0 {
+		return len(proof) == 0
+	}
+	if len(proof) == 0 {
+		return false
+	}
+
+	pIdx := 0
+	oh, nh, ok := verifyConsistencyRec(oldSize, newSize, true, oldRoot, proof, &pIdx)
+	return ok && pIdx == len(proof) && bytesEqual(oh, oldRoot) && bytesEqual(nh, newRoot)
+}
+
+func verifyConsistencyRec(m, n int64, openRight bool, passThrough []byte, proof [][]byte, pIdx *int) ([]byte, []byte, bool) {
+	if m == n {
+		if openRight {
+			return passThrough, passThrough, true
+		}
+		if *pIdx >= len(proof) {
+			return nil, nil, false
+		}
+		h := proof[*pIdx]
+		*pIdx++
+		return h, h, true
+	}
+	k := int64(consistencySplitPoint(int(n)))
+	if m <= k {
+		oldH, newLeftH, ok := verifyConsistencyRec(m, k, openRight, passThrough, proof, pIdx)
+		if !ok {
+			return nil, nil, false
+		}
+		if *pIdx >= len(proof) {
+			return nil, nil, false
+		}
+		rightH := proof[*pIdx]
+		*pIdx++
+		return oldH, interiorHash(newLeftH, rightH), true
+	}
+	oldRightH, newRightH, ok := verifyConsistencyRec(m-k, n-k, false, nil, proof, pIdx)
+	if !ok {
+		return nil, nil, false
+	}
+	if *pIdx >= len(proof) {
+		return nil, nil, false
+	}
+	leftH := proof[*pIdx]
+	*pIdx++
+	return interiorHash(leftH, oldRightH), interiorHash(leftH, newRightH), true
+}
+
+// consistencySplitPoint returns the largest power of 2 less than n.
+func consistencySplitPoint(n int) int {
+	if n < 2 {
+		return 0
+	}
+	// Find highest bit position, then take one less.
+	k := 1
+	for k*2 < n {
+		k *= 2
+	}
+	return k
+}
+
+// interiorHash computes SHA-256(0x01 || left || right).
+func interiorHash(left, right []byte) []byte {
+	h := sha256.New()
+	h.Write([]byte{0x01})
+	h.Write(left)
+	h.Write(right)
+	return h.Sum(nil)
+}
+
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (c *conformanceClient) testConsistencyProofEdgeCases() error {
+	// Test 1: Missing params returns 400.
+	_, status, err := c.get("/proof/consistency")
+	if err != nil {
+		return fmt.Errorf("request with no params failed: %w", err)
+	}
+	if status != 400 {
+		return fmt.Errorf("expected 400 for missing params, got %d", status)
+	}
+
+	// Test 2: old > new returns 400.
+	_, status, err = c.get("/proof/consistency?old=5&new=2")
+	if err != nil {
+		return fmt.Errorf("request with old>new failed: %w", err)
+	}
+	if status != 400 {
+		return fmt.Errorf("expected 400 for old>new, got %d", status)
+	}
+
+	// Test 3: new > treeSize returns 400.
+	_, status, err = c.get(fmt.Sprintf("/proof/consistency?old=1&new=%d", c.treeSize+1000))
+	if err != nil {
+		return fmt.Errorf("request with new>treeSize failed: %w", err)
+	}
+	if status != 400 {
+		return fmt.Errorf("expected 400 for new>treeSize, got %d", status)
+	}
+
+	// Test 4: old=0 returns 400.
+	_, status, err = c.get("/proof/consistency?old=0&new=1")
+	if err != nil {
+		return fmt.Errorf("request with old=0 failed: %w", err)
+	}
+	if status != 400 {
+		return fmt.Errorf("expected 400 for old=0, got %d", status)
 	}
 
 	return nil
