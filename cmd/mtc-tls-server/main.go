@@ -329,6 +329,7 @@ func main() {
 	// TLS config.
 	tlsConfig := &tls.Config{
 		GetCertificate: state.getCertificate,
+		MinVersion:     tls.VersionTLS13,
 	}
 
 	server := &http.Server{

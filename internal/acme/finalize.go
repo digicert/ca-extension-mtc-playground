@@ -99,7 +99,7 @@ func (srv *Server) handleFinalize(w http.ResponseWriter, r *http.Request) {
 	}
 
 	srv.logger.Info("acme: order finalizing", "order_id", orderID, "cn", csr.Subject.CommonName)
-	go srv.processFinalize(context.Background(), orderID, csr, csrPEM, orderIdents)
+	go srv.processFinalize(srv.ctx, orderID, csr, csrPEM, orderIdents)
 
 	order.Status = "processing"
 	authzURLs, _ := srv.getAuthzURLs(r.Context(), orderID)

@@ -71,6 +71,7 @@ func main() {
 	// Step 1: TLS handshake.
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: *insecure,
+		MinVersion:         tls.VersionTLS13,
 	}
 
 	if *verbose {

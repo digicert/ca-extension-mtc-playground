@@ -9,6 +9,7 @@
 package acme
 
 import (
+	"context"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -44,6 +45,8 @@ type Server struct {
 	nonces  map[string]time.Time
 	localCA *localca.LocalCA   // nil = DigiCert proxy, non-nil = local CA with embedded proofs
 	ilog    *issuancelog.Log   // needed for direct log append in local CA mode
+	ctx     context.Context    // server-scoped context; cancelled on shutdown
+	cancel  context.CancelFunc // cancels ctx on shutdown
 }
 
 // New creates a new ACME server. The localCA and ilog parameters are optional;
@@ -59,6 +62,7 @@ func New(s *store.Store, cfg Config, logger *slog.Logger, lca *localca.LocalCA, 
 	if cfg.AssertionPollInterval <= 0 {
 		cfg.AssertionPollInterval = 5 * time.Second
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	srv := &Server{
 		store:   s,
 		cfg:     cfg,
@@ -67,6 +71,8 @@ func New(s *store.Store, cfg Config, logger *slog.Logger, lca *localca.LocalCA, 
 		nonces:  make(map[string]time.Time),
 		localCA: lca,
 		ilog:    ilog,
+		ctx:     ctx,
+		cancel:  cancel,
 	}
 	srv.mux.HandleFunc("GET /acme/directory", srv.handleDirectory)
 	srv.mux.HandleFunc("HEAD /acme/new-nonce", srv.handleNewNonce)
@@ -81,6 +87,12 @@ func New(s *store.Store, cfg Config, logger *slog.Logger, lca *localca.LocalCA, 
 	srv.mux.HandleFunc("POST /acme/certificate/{id}", srv.handleCertificate)
 	go srv.cleanupNonces()
 	return srv
+}
+
+// Shutdown cancels the server-scoped context, signalling background
+// goroutines (challenge validation, finalize processing) to stop.
+func (srv *Server) Shutdown() {
+	srv.cancel()
 }
 
 // ServeHTTP implements http.Handler.

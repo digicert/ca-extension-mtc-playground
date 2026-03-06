@@ -53,7 +53,7 @@ func main() {
 	httpClient := &http.Client{Timeout: 30 * time.Second}
 	if *insecure || strings.HasPrefix(*acmeURL, "https://") {
 		httpClient.Transport = &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12},
 		}
 	}
 

@@ -12,12 +12,40 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 
 	"github.com/briantrzupek/ca-extension-merkle/internal/store"
 )
+
+// isAllowedHTTP01Target validates that a hostname does not resolve to a
+// private, loopback, or link-local IP address, preventing SSRF attacks
+// through the ACME HTTP-01 challenge validation path.
+func isAllowedHTTP01Target(host string) error {
+	// Strip port if present.
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		h = host // no port
+	}
+
+	addrs, err := net.LookupHost(h)
+	if err != nil {
+		return fmt.Errorf("dns lookup failed for %q: %w", h, err)
+	}
+
+	for _, addr := range addrs {
+		ip := net.ParseIP(addr)
+		if ip == nil {
+			continue
+		}
+		if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() {
+			return fmt.Errorf("http-01 target %q resolves to disallowed address %s", h, addr)
+		}
+	}
+	return nil
+}
 
 func (srv *Server) handleDirectory(w http.ResponseWriter, r *http.Request) {
 	dir := map[string]interface{}{
@@ -280,7 +308,7 @@ func (srv *Server) handleChallenge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	go srv.validateChallenge(context.Background(), ch, acct)
+	go srv.validateChallenge(srv.ctx, ch, acct)
 	ch.Status = "processing"
 	srv.renderChallenge(w, ch)
 }
@@ -352,6 +380,10 @@ func (srv *Server) performHTTP01(ctx context.Context, ch *store.ACMEChallenge, k
 	if err := json.Unmarshal(authz.Identifier, &ident); err != nil {
 		return fmt.Errorf("parse identifier: %w", err)
 	}
+	if err := isAllowedHTTP01Target(ident.Value); err != nil {
+		return fmt.Errorf("ssrf check: %w", err)
+	}
+
 	url := fmt.Sprintf("http://%s/.well-known/acme-challenge/%s", ident.Value, ch.Token)
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(url)
