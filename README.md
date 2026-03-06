@@ -175,7 +175,7 @@ which auto-detects the certificate format.
   - **REST API endpoint** — typically `http://<ca-host>/certificate-authority/api/v1`
 - **MariaDB 10.11+** — the CA's backing database (`digicert_ca` schema)
   - mtc-bridge needs **read-only** `SELECT` access to the `certificate` and `ca` tables
-  - Default credentials: `caadmin`/`capassword` on port 3306
+  - Default credentials: `<DB_USERNAME>`/`<DB_PASSWORD>` on port 3306
   - The CA database must be reachable on the `digicert-ca_default` Docker network
 
 ### Infrastructure
