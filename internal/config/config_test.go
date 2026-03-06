@@ -80,10 +80,10 @@ func TestMariaDBDSN(t *testing.T) {
 		Host:     "ca-db",
 		Port:     3306,
 		Database: "digicert_ca",
-		Username: "caadmin",
-		Password: "capassword",
+		Username: "testdbuser",
+		Password: "testdbpass",
 	}
-	want := "caadmin:capassword@tcp(ca-db:3306)/digicert_ca?parseTime=true&loc=UTC"
+	want := "testdbuser:testdbpass@tcp(ca-db:3306)/digicert_ca?parseTime=true&loc=UTC"
 	if got := cfg.DSN(); got != want {
 		t.Errorf("DSN() = %q, want %q", got, want)
 	}
@@ -101,7 +101,7 @@ func TestValidate(t *testing.T) {
 	cfg.StateDB.Host = "localhost"
 	cfg.StateDB.Username = "user"
 	cfg.CADB.Host = "ca-db"
-	cfg.CADB.Username = "caadmin"
+	cfg.CADB.Username = "testdbuser"
 	cfg.Cosigner.KeyFile = "/etc/mtc-bridge/key.pem"
 
 	err = cfg.Validate()
@@ -141,8 +141,8 @@ state_db:
 ca_db:
   host: ca-db
   port: 3306
-  username: caadmin
-  password: capassword
+  username: testdbuser
+  password: testdbpass
 cosigner:
   key_file: /tmp/key.pem
 `

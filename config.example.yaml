@@ -29,8 +29,8 @@ ca_db:
   host: "${MTC_CA_DB_HOST:-ca-db}"
   port: 3306
   database: "digicert_ca"
-  username: "${MTC_CA_DB_USER:-caadmin}"
-  password: "${MTC_CA_DB_PASSWORD:-capassword}"
+  username: "${MTC_CA_DB_USER}"
+  password: "${MTC_CA_DB_PASSWORD}"
   issuer_id: ""  # empty = all CAs
 
 http:

@@ -28,8 +28,8 @@ ca_db:
   host: "${MTC_CADB_HOST:-localhost}"
   port: ${MTC_CADB_PORT:-3306}
   database: "${MTC_CADB_DATABASE:-digicert_ca}"
-  username: "${MTC_CADB_USERNAME:-caadmin}"
-  password: "${MTC_CADB_PASSWORD:-capassword}"
+  username: "${MTC_CADB_USERNAME}"
+  password: "${MTC_CADB_PASSWORD}"
   issuer_id: ""  # all CAs
 
 http:

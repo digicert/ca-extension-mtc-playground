@@ -213,7 +213,7 @@ cp .env.example .env
 | `CA_TEMPLATE_ID` | Certificate template ID | `0196198F96545084143B237D9E39FC90` |
 | `CA_URL` | CA API base URL | `http://digicert-ca:8080` |
 | `MTC_CADB_HOST` | MariaDB hostname | `ca-db` |
-| `MTC_CADB_PASSWORD` | MariaDB password | `capassword` |
+| `MTC_CADB_PASSWORD` | MariaDB password | *(required)* |
 
 ### Optional: Local CA Mode
 
@@ -1486,8 +1486,8 @@ CA_URL=http://digicert-ca:8080     # Docker service name
 MTC_POSTGRES_PASSWORD=mtcbridge
 MTC_CADB_HOST=ca-db
 MTC_CADB_PORT=3306
-MTC_CADB_USERNAME=caadmin
-MTC_CADB_PASSWORD=capassword
+MTC_CADB_USERNAME=<your-db-username>
+MTC_CADB_PASSWORD=<your-db-password>
 MTC_CADB_DATABASE=digicert_ca
 ```
 

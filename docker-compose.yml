@@ -50,8 +50,8 @@ services:
       MTC_STATE_DB_DATABASE: mtcbridge
       MTC_CADB_HOST: ${MTC_CADB_HOST:-ca-db}
       MTC_CADB_PORT: ${MTC_CADB_PORT:-3306}
-      MTC_CADB_USERNAME: ${MTC_CADB_USERNAME:-caadmin}
-      MTC_CADB_PASSWORD: ${MTC_CADB_PASSWORD:-capassword}
+      MTC_CADB_USERNAME: ${MTC_CADB_USERNAME:?MTC_CADB_USERNAME required}
+      MTC_CADB_PASSWORD: ${MTC_CADB_PASSWORD:?MTC_CADB_PASSWORD required}
       MTC_CADB_DATABASE: ${MTC_CADB_DATABASE:-digicert_ca}
       MTC_COSIGNER_KEY_FILE: /etc/mtc-bridge/keys/cosigner.key
       MTC_LOCAL_CA_KEY: /etc/mtc-bridge/keys/local-ca.key
@@ -82,8 +82,8 @@ services:
       MTC_STATE_DB_DATABASE: mtcbridge
       MTC_CADB_HOST: ${MTC_CADB_HOST:-ca-db}
       MTC_CADB_PORT: ${MTC_CADB_PORT:-3306}
-      MTC_CADB_USERNAME: ${MTC_CADB_USERNAME:-caadmin}
-      MTC_CADB_PASSWORD: ${MTC_CADB_PASSWORD:-capassword}
+      MTC_CADB_USERNAME: ${MTC_CADB_USERNAME:?MTC_CADB_USERNAME required}
+      MTC_CADB_PASSWORD: ${MTC_CADB_PASSWORD:?MTC_CADB_PASSWORD required}
       MTC_CADB_DATABASE: ${MTC_CADB_DATABASE:-digicert_ca}
       CA_API_KEY: ${CA_API_KEY}
       CA_ID: ${CA_ID}
