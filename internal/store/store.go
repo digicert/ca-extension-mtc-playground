@@ -1589,6 +1589,7 @@ func (s *Store) GetACMEChallengeByToken(ctx context.Context, token string) (*ACM
 // VizSummary is a hierarchical aggregation of certificate data for visualization.
 type VizSummary struct {
 	Name           string        `json:"name"`
+	BatchKey       string        `json:"batch_key,omitempty"`
 	Level          string        `json:"level"`
 	CertCount      int64         `json:"certCount"`
 	RevokedCount   int64         `json:"revokedCount"`
@@ -1822,7 +1823,7 @@ func (s *Store) GetVizSummary(ctx context.Context) (*VizSummary, error) {
 		bk := batchKey{caName, batchLabel}
 		batch, ok := batchMap[bk]
 		if !ok {
-			batch = &VizSummary{Name: batchLabel, Level: "batch", Color: ca.Color}
+			batch = &VizSummary{Name: batchLabel, BatchKey: batchWin.Format(time.RFC3339), Level: "batch", Color: ca.Color}
 			batchMap[bk] = batch
 			ca.Children = append(ca.Children, batch)
 		}

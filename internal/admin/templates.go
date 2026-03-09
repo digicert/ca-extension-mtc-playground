@@ -802,7 +802,8 @@ const vizExplorerHTML = `<!DOCTYPE html>
 	async function loadLeafCerts() {
 		const path = drillPath.map(n => n.name);
 		const ca = path[1] || '';
-		const batch = path[2] || '';
+		const batchNode = drillPath[2];
+		const batch = (batchNode && batchNode.batch_key) || '';
 		const algo = path[3] || '';
 		const params = new URLSearchParams({ca, batch, algo, page: '1'});
 		try {
