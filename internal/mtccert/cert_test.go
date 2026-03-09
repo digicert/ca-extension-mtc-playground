@@ -60,11 +60,10 @@ func testProof() *mtcformat.MTCProof {
 func TestBuildAndParseMTCCertificate(t *testing.T) {
 	csr := testCSR(t)
 	proof := testProof()
-	issuer := pkix.Name{CommonName: "Test CA", Country: []string{"US"}}
 	notBefore := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	notAfter := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
 
-	certDER, err := BuildMTCCertFromCSR(csr, issuer, notBefore, notAfter, []string{"test.example.com"}, 42, proof)
+	certDER, err := BuildMTCCertFromCSR(csr, "test-log", notBefore, notAfter, []string{"test.example.com"}, 42, proof)
 	if err != nil {
 		t.Fatalf("BuildMTCCertFromCSR: %v", err)
 	}
@@ -118,7 +117,6 @@ func TestBuildAndParseMTCCertificate(t *testing.T) {
 
 func TestBuildMTCCertificateWithSignatures(t *testing.T) {
 	csr := testCSR(t)
-	issuer := pkix.Name{CommonName: "Test CA", Country: []string{"US"}}
 	notBefore := time.Now().UTC().Truncate(time.Second)
 	notAfter := notBefore.Add(365 * 24 * time.Hour)
 
@@ -134,12 +132,12 @@ func TestBuildMTCCertificateWithSignatures(t *testing.T) {
 			sha256.New().Sum(nil), // dummy hash
 		},
 		Signatures: []mtcformat.MTCSignature{
-			{CosignerID: 0, Signature: sig},
-			{CosignerID: 1, Signature: sig},
+			{CosignerID: []byte("cosigner-0"), Signature: sig},
+			{CosignerID: []byte("cosigner-1"), Signature: sig},
 		},
 	}
 
-	certDER, err := BuildMTCCertFromCSR(csr, issuer, notBefore, notAfter, []string{"test.example.com"}, 150, proof)
+	certDER, err := BuildMTCCertFromCSR(csr, "test-log", notBefore, notAfter, []string{"test.example.com"}, 150, proof)
 	if err != nil {
 		t.Fatalf("BuildMTCCertFromCSR: %v", err)
 	}
@@ -155,21 +153,20 @@ func TestBuildMTCCertificateWithSignatures(t *testing.T) {
 	if len(parsed.Proof.Signatures) != 2 {
 		t.Fatalf("signatures = %d, want 2", len(parsed.Proof.Signatures))
 	}
-	if parsed.Proof.Signatures[0].CosignerID != 0 {
-		t.Errorf("sig[0].CosignerID = %d, want 0", parsed.Proof.Signatures[0].CosignerID)
+	if string(parsed.Proof.Signatures[0].CosignerID) != "cosigner-0" {
+		t.Errorf("sig[0].CosignerID = %q, want %q", parsed.Proof.Signatures[0].CosignerID, "cosigner-0")
 	}
-	if parsed.Proof.Signatures[1].CosignerID != 1 {
-		t.Errorf("sig[1].CosignerID = %d, want 1", parsed.Proof.Signatures[1].CosignerID)
+	if string(parsed.Proof.Signatures[1].CosignerID) != "cosigner-1" {
+		t.Errorf("sig[1].CosignerID = %q, want %q", parsed.Proof.Signatures[1].CosignerID, "cosigner-1")
 	}
 }
 
 func TestIsMTCCertificate(t *testing.T) {
 	csr := testCSR(t)
 	proof := testProof()
-	issuer := pkix.Name{CommonName: "Test CA"}
 	now := time.Now().UTC().Truncate(time.Second)
 
-	certDER, err := BuildMTCCertFromCSR(csr, issuer, now, now.Add(time.Hour), []string{"test.example.com"}, 1, proof)
+	certDER, err := BuildMTCCertFromCSR(csr, "test-log", now, now.Add(time.Hour), []string{"test.example.com"}, 1, proof)
 	if err != nil {
 		t.Fatalf("BuildMTCCertFromCSR: %v", err)
 	}
@@ -202,11 +199,11 @@ func TestIsMTCCertificate(t *testing.T) {
 func TestReconstructLogEntry(t *testing.T) {
 	csr := testCSR(t)
 	proof := testProof()
-	issuer := pkix.Name{CommonName: "Test CA", Country: []string{"US"}}
+	logID := "test-log"
 	notBefore := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	notAfter := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
 
-	certDER, err := BuildMTCCertFromCSR(csr, issuer, notBefore, notAfter, []string{"test.example.com"}, 42, proof)
+	certDER, err := BuildMTCCertFromCSR(csr, logID, notBefore, notAfter, []string{"test.example.com"}, 42, proof)
 	if err != nil {
 		t.Fatalf("BuildMTCCertFromCSR: %v", err)
 	}
@@ -227,7 +224,7 @@ func TestReconstructLogEntry(t *testing.T) {
 	}
 
 	// Also build the log entry directly from CSR (the way it would be built at issuance time).
-	directLogEntry, err := mtcformat.BuildLogEntryFromCSR(issuer, notBefore, notAfter, csr, []string{"test.example.com"})
+	directLogEntry, err := mtcformat.BuildLogEntryFromCSR(logID, notBefore, notAfter, csr, []string{"test.example.com"})
 	if err != nil {
 		t.Fatalf("BuildLogEntryFromCSR: %v", err)
 	}

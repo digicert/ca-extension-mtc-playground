@@ -122,20 +122,21 @@ func BuildMTCCertificate(fields TBSFields, leafIndex int64, proof *mtcformat.MTC
 	return certDER, nil
 }
 
-// BuildMTCCertFromCSR constructs an MTC certificate from a CSR, CA name, and proof.
-// This is the primary entry point for the local CA MTC flow.
+// BuildMTCCertFromCSR constructs an MTC certificate from a CSR, log ID, and proof.
+// The logID is the log's trust anchor identifier, used to construct the spec-compliant
+// issuer DN per §5.2. This is the primary entry point for the local CA MTC flow.
 func BuildMTCCertFromCSR(
 	csr *x509.CertificateRequest,
-	issuerName pkix.Name,
+	logID string,
 	notBefore, notAfter time.Time,
 	dnsNames []string,
 	leafIndex int64,
 	proof *mtcformat.MTCProof,
 ) ([]byte, error) {
-	// Marshal issuer Name to DER.
-	issuerDER, err := asn1.Marshal(issuerName.ToRDNSequence())
+	// Build issuer DN using trust anchor ID format per §5.2.
+	issuerRaw, err := mtcformat.BuildTrustAnchorDN(logID)
 	if err != nil {
-		return nil, fmt.Errorf("mtccert: marshal issuer: %w", err)
+		return nil, fmt.Errorf("mtccert: build issuer DN: %w", err)
 	}
 
 	// Marshal subject Name to DER.
@@ -151,7 +152,7 @@ func BuildMTCCertFromCSR(
 	}
 
 	fields := TBSFields{
-		Issuer:            asn1.RawValue{FullBytes: issuerDER},
+		Issuer:            issuerRaw,
 		NotBefore:         notBefore,
 		NotAfter:          notAfter,
 		Subject:           asn1.RawValue{FullBytes: subjectDER},

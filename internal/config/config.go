@@ -292,8 +292,8 @@ type AdditionalCosignerConfig struct {
 	// Algorithm is the signature algorithm: "ed25519", "mldsa44", "mldsa65", "mldsa87".
 	Algorithm string `yaml:"algorithm"`
 
-	// CosignerID is the numeric identifier for MTCSignature.
-	CosignerID uint16 `yaml:"cosigner_id"`
+	// CosignerID is the TrustAnchorID for MTCSignature (ASCII string, e.g. "32473.1").
+	CosignerID string `yaml:"cosigner_id"`
 }
 
 // LoggingConfig configures structured logging.

@@ -1,4 +1,5 @@
 # MTC Bridge — AI Guidance
+This is a greenfield playground and experiment, so please feel free to update database schemas etc (braking changes from a migration purpose), but please let me know about those choices afterwards.
 
 ## Project Purpose
 

@@ -639,14 +639,14 @@ func (h *Handler) handleLandmarkByTreeSize(w http.ResponseWriter, r *http.Reques
 	}
 
 	type sigJSON struct {
-		CosignerID int    `json:"cosigner_id"`
+		CosignerID string `json:"cosigner_id"`
 		Algorithm  int    `json:"algorithm"`
 		Signature  string `json:"signature"`
 	}
 	sigResults := make([]sigJSON, len(sigs))
 	for i, s := range sigs {
 		sigResults[i] = sigJSON{
-			CosignerID: int(s.CosignerID),
+			CosignerID: s.CosignerID,
 			Algorithm:  int(s.Algorithm),
 			Signature:  hex.EncodeToString(s.Signature),
 		}

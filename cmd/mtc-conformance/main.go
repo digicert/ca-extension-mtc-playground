@@ -153,6 +153,23 @@ func (c *conformanceClient) get(path string) ([]byte, int, error) {
 	return body, resp.StatusCode, nil
 }
 
+// currentTreeSize re-fetches the checkpoint and returns the current tree size.
+func (c *conformanceClient) currentTreeSize() (int64, error) {
+	body, _, err := c.get("/checkpoint")
+	if err != nil {
+		return 0, err
+	}
+	lines := strings.Split(strings.TrimRight(string(body), "\n"), "\n")
+	if len(lines) < 2 {
+		return 0, fmt.Errorf("checkpoint too short")
+	}
+	size, err := strconv.ParseInt(lines[1], 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse tree size: %w", err)
+	}
+	return size, nil
+}
+
 func (c *conformanceClient) testCheckpointExists() error {
 	body, status, err := c.get("/checkpoint")
 	if err != nil {
@@ -472,7 +489,12 @@ func (c *conformanceClient) testProofAPIInclusion() error {
 	}
 
 	// Test 2: Invalid index returns 404.
-	_, status, err = c.get(fmt.Sprintf("/proof/inclusion?index=%d", c.treeSize+1000))
+	// Re-fetch current tree size in case earlier tests grew it.
+	curSize, err := c.currentTreeSize()
+	if err != nil {
+		return fmt.Errorf("re-fetch tree size: %w", err)
+	}
+	_, status, err = c.get(fmt.Sprintf("/proof/inclusion?index=%d", curSize+1000))
 	if err != nil {
 		return fmt.Errorf("request for out-of-range index failed: %w", err)
 	}
@@ -1431,11 +1453,10 @@ func (c *conformanceClient) testMTCCertFormat() error {
 		InclusionProof: [][]byte{h[:]},
 	}
 
-	issuer := pkix.Name{CommonName: "Conformance CA", Country: []string{"US"}}
 	notBefore := time.Now().UTC().Truncate(time.Second)
 	notAfter := notBefore.Add(365 * 24 * time.Hour)
 
-	certDER, err := mtccert.BuildMTCCertFromCSR(csr, issuer, notBefore, notAfter,
+	certDER, err := mtccert.BuildMTCCertFromCSR(csr, "conformance-log", notBefore, notAfter,
 		[]string{"mtc-conformance.example.com"}, 42, proof)
 	if err != nil {
 		return fmt.Errorf("BuildMTCCertFromCSR: %w", err)
@@ -1481,8 +1502,8 @@ func (c *conformanceClient) testMTCProofRoundtrip() error {
 			h2[:],
 		},
 		Signatures: []mtcformat.MTCSignature{
-			{CosignerID: 0, Signature: sig},
-			{CosignerID: 1, Signature: sig},
+			{CosignerID: []byte("cosigner-0"), Signature: sig},
+			{CosignerID: []byte("cosigner-1"), Signature: sig},
 		},
 	}
 
@@ -1508,7 +1529,7 @@ func (c *conformanceClient) testMTCProofRoundtrip() error {
 	if len(parsed.Signatures) != 2 {
 		return fmt.Errorf("Signatures len = %d, want 2", len(parsed.Signatures))
 	}
-	if parsed.Signatures[0].CosignerID != 0 || parsed.Signatures[1].CosignerID != 1 {
+	if string(parsed.Signatures[0].CosignerID) != "cosigner-0" || string(parsed.Signatures[1].CosignerID) != "cosigner-1" {
 		return fmt.Errorf("cosigner IDs mismatch")
 	}
 
@@ -1747,7 +1768,12 @@ func (c *conformanceClient) testConsistencyProofEdgeCases() error {
 	}
 
 	// Test 3: new > treeSize returns 400.
-	_, status, err = c.get(fmt.Sprintf("/proof/consistency?old=1&new=%d", c.treeSize+1000))
+	// Re-fetch checkpoint to get current tree size (tree may have grown during earlier tests).
+	currentSize, err := c.currentTreeSize()
+	if err != nil {
+		return fmt.Errorf("re-fetch tree size: %w", err)
+	}
+	_, status, err = c.get(fmt.Sprintf("/proof/consistency?old=1&new=%d", currentSize+1000))
 	if err != nil {
 		return fmt.Errorf("request with new>treeSize failed: %w", err)
 	}
@@ -1792,11 +1818,10 @@ func (c *conformanceClient) testMTCLogEntryReconstruct() error {
 		InclusionProof: [][]byte{h[:]},
 	}
 
-	issuer := pkix.Name{CommonName: "Reconstruct CA", Country: []string{"US"}}
 	notBefore := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	notAfter := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
 
-	certDER, err := mtccert.BuildMTCCertFromCSR(csr, issuer, notBefore, notAfter,
+	certDER, err := mtccert.BuildMTCCertFromCSR(csr, "reconstruct-log", notBefore, notAfter,
 		[]string{"reconstruct.example.com"}, 10, proof)
 	if err != nil {
 		return fmt.Errorf("BuildMTCCertFromCSR: %w", err)

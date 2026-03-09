@@ -250,6 +250,7 @@ func GenerateCA(keyFile, certFile string, org, country string) error {
 //   - serialNumber = leafIndex (the Merkle tree position)
 //   - signatureAlgorithm = id-alg-mtcProof
 //   - signatureValue = binary-encoded MTCProof
+//   - issuer = trust anchor DN constructed from logID per §5.2
 //
 // Unlike IssueWithProof, this does NOT use the CA's signing key for a per-cert
 // signature. The certificate's authenticity comes from the Merkle tree proof
@@ -260,6 +261,7 @@ func (ca *LocalCA) IssueMTCCert(
 	validity time.Duration,
 	leafIndex int64,
 	proof *mtcformat.MTCProof,
+	logID string,
 ) ([]byte, error) {
 	if validity == 0 {
 		validity = ca.validity
@@ -267,9 +269,10 @@ func (ca *LocalCA) IssueMTCCert(
 
 	now := time.Now().UTC().Truncate(time.Second)
 
-	issuerDER, err := asn1.Marshal(ca.cert.Subject.ToRDNSequence())
+	// Build issuer DN using trust anchor ID format per MTC spec §5.2.
+	issuerRaw, err := mtcformat.BuildTrustAnchorDN(logID)
 	if err != nil {
-		return nil, fmt.Errorf("localca: marshal issuer: %w", err)
+		return nil, fmt.Errorf("localca: build issuer DN: %w", err)
 	}
 
 	subjectDER, err := asn1.Marshal(pkix.Name{
@@ -287,7 +290,7 @@ func (ca *LocalCA) IssueMTCCert(
 	}
 
 	fields := mtccert.TBSFields{
-		Issuer:            asn1.RawValue{FullBytes: issuerDER},
+		Issuer:            issuerRaw,
 		NotBefore:         now,
 		NotAfter:          now.Add(validity),
 		Subject:           asn1.RawValue{FullBytes: subjectDER},

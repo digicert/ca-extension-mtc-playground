@@ -265,11 +265,10 @@ func runMTCMode(domain, output string) {
 
 	// Step 2: Build MerkleTreeCertEntry (spec log entry format).
 	fmt.Fprintln(os.Stderr, "Step 2: Building TBSCertificateLogEntry (SPKI hashed)...")
-	issuer := pkix.Name{CommonName: "MTC Demo CA", Country: []string{"US"}}
 	notBefore := time.Now().UTC().Truncate(time.Second)
 	notAfter := notBefore.Add(365 * 24 * time.Hour)
 
-	logEntryDER, err := mtcformat.BuildLogEntryFromCSR(issuer, notBefore, notAfter, csr, []string{domain})
+	logEntryDER, err := mtcformat.BuildLogEntryFromCSR("mtc-demo-log", notBefore, notAfter, csr, []string{domain})
 	if err != nil {
 		fatal("build log entry: %v", err)
 	}
@@ -278,15 +277,19 @@ func runMTCMode(domain, output string) {
 	fmt.Fprintf(os.Stderr, "        SPKI hash: %s\n", hex.EncodeToString(spkiHash[:]))
 	fmt.Fprintf(os.Stderr, "        Log entry: %d bytes DER\n", len(logEntryDER))
 
+	contentsOctets, err := mtcformat.DERContentsOctets(logEntryDER)
+	if err != nil {
+		fatal("strip DER envelope: %v", err)
+	}
 	mtcEntry := &mtcformat.MerkleTreeCertEntry{
 		Type: mtcformat.EntryTypeTBSCert,
-		Data: logEntryDER,
+		Data: contentsOctets,
 	}
 	wireData, err := mtcformat.MarshalEntry(mtcEntry)
 	if err != nil {
 		fatal("marshal entry: %v", err)
 	}
-	fmt.Fprintf(os.Stderr, "        Wire data: %d bytes (1B type + 3B len + DER)\n", len(wireData))
+	fmt.Fprintf(os.Stderr, "        Wire data: %d bytes (2B type + 3B len + contents octets)\n", len(wireData))
 	fmt.Fprintln(os.Stderr, "")
 
 	// Step 3: Build Merkle tree.
@@ -336,7 +339,7 @@ func runMTCMode(domain, output string) {
 
 	// Step 5: Build MTC certificate.
 	fmt.Fprintln(os.Stderr, "Step 5: Building MTC certificate (id-alg-mtcProof)...")
-	certDER, err := mtccert.BuildMTCCertFromCSR(csr, issuer, notBefore, notAfter, []string{domain}, leafIndex, mtcProof)
+	certDER, err := mtccert.BuildMTCCertFromCSR(csr, "mtc-demo-log", notBefore, notAfter, []string{domain}, leafIndex, mtcProof)
 	if err != nil {
 		fatal("build MTC cert: %v", err)
 	}

@@ -125,6 +125,8 @@ func main() {
 		logger.Error("failed to initialize cosigner", "error", err)
 		os.Exit(1)
 	}
+	// Set the cosigner's TrustAnchorID from the log origin.
+	cs.SetCosignerID([]byte(cfg.Log.Origin))
 	logger.Info("cosigner initialized",
 		"key_id", cs.KeyID(),
 		"origin", cs.Origin(),

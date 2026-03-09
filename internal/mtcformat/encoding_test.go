@@ -21,8 +21,8 @@ func TestMarshalUnmarshalNullEntry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalEntry(null): %v", err)
 	}
-	if !bytes.Equal(data, []byte{0x00}) {
-		t.Fatalf("null entry should be single zero byte, got %x", data)
+	if !bytes.Equal(data, []byte{0x00, 0x00}) {
+		t.Fatalf("null entry should be two zero bytes (uint16), got %x", data)
 	}
 
 	parsed, err := UnmarshalEntry(data)
@@ -49,15 +49,15 @@ func TestMarshalUnmarshalTBSCertEntry(t *testing.T) {
 		t.Fatalf("MarshalEntry(tbs): %v", err)
 	}
 
-	// Verify structure: 1 byte type + 3 byte length + data.
-	if data[0] != EntryTypeTBSCert {
-		t.Fatalf("expected type 1, got %d", data[0])
+	// Verify structure: 2 byte type (uint16) + 3 byte length + data.
+	if binary.BigEndian.Uint16(data[0:2]) != EntryTypeTBSCert {
+		t.Fatalf("expected type 1, got %d", binary.BigEndian.Uint16(data[0:2]))
 	}
-	encodedLen := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
+	encodedLen := int(data[2])<<16 | int(data[3])<<8 | int(data[4])
 	if encodedLen != len(testData) {
 		t.Fatalf("encoded length %d != data length %d", encodedLen, len(testData))
 	}
-	if !bytes.Equal(data[4:], testData) {
+	if !bytes.Equal(data[5:], testData) {
 		t.Fatalf("data mismatch")
 	}
 
@@ -83,15 +83,15 @@ func TestMarshalEntryEmptyDataError(t *testing.T) {
 }
 
 func TestUnmarshalEntryTrailingDataError(t *testing.T) {
-	// null_entry with extra bytes
-	_, err := UnmarshalEntry([]byte{0x00, 0xFF})
+	// null_entry (2 bytes) with extra byte
+	_, err := UnmarshalEntry([]byte{0x00, 0x00, 0xFF})
 	if err == nil {
 		t.Fatal("expected error for null_entry with trailing data")
 	}
 }
 
 func TestUnmarshalEntryUnknownType(t *testing.T) {
-	_, err := UnmarshalEntry([]byte{0xFF})
+	_, err := UnmarshalEntry([]byte{0x00, 0xFF})
 	if err == nil {
 		t.Fatal("expected error for unknown entry type")
 	}
@@ -111,7 +111,7 @@ func TestMarshalUnmarshalProofSignedMode(t *testing.T) {
 			hash2[:],
 		},
 		Signatures: []MTCSignature{
-			{CosignerID: 42, Signature: sig},
+			{CosignerID: []byte("cosigner-42"), Signature: sig},
 		},
 	}
 
@@ -143,8 +143,8 @@ func TestMarshalUnmarshalProofSignedMode(t *testing.T) {
 	if len(parsed.Signatures) != 1 {
 		t.Fatalf("Signatures: got %d, want 1", len(parsed.Signatures))
 	}
-	if parsed.Signatures[0].CosignerID != 42 {
-		t.Errorf("CosignerID: got %d, want 42", parsed.Signatures[0].CosignerID)
+	if string(parsed.Signatures[0].CosignerID) != "cosigner-42" {
+		t.Errorf("CosignerID: got %q, want %q", parsed.Signatures[0].CosignerID, "cosigner-42")
 	}
 	if !bytes.Equal(parsed.Signatures[0].Signature, sig) {
 		t.Error("signature bytes mismatch")
@@ -235,8 +235,8 @@ func TestMarshalUnmarshalProofMultipleSignatures(t *testing.T) {
 		End:            500,
 		InclusionProof: [][]byte{hash[:]},
 		Signatures: []MTCSignature{
-			{CosignerID: 0, Signature: sig1},
-			{CosignerID: 1, Signature: sig2},
+			{CosignerID: []byte("cosigner-0"), Signature: sig1},
+			{CosignerID: []byte("cosigner-1"), Signature: sig2},
 		},
 	}
 
@@ -254,10 +254,10 @@ func TestMarshalUnmarshalProofMultipleSignatures(t *testing.T) {
 		t.Fatalf("expected 2 signatures, got %d", len(parsed.Signatures))
 	}
 
-	if parsed.Signatures[0].CosignerID != 0 || !bytes.Equal(parsed.Signatures[0].Signature, sig1) {
+	if string(parsed.Signatures[0].CosignerID) != "cosigner-0" || !bytes.Equal(parsed.Signatures[0].Signature, sig1) {
 		t.Error("signature 0 mismatch")
 	}
-	if parsed.Signatures[1].CosignerID != 1 || !bytes.Equal(parsed.Signatures[1].Signature, sig2) {
+	if string(parsed.Signatures[1].CosignerID) != "cosigner-1" || !bytes.Equal(parsed.Signatures[1].Signature, sig2) {
 		t.Error("signature 1 mismatch")
 	}
 }
@@ -307,8 +307,9 @@ func TestProofWireFormatLayout(t *testing.T) {
 func TestBuildSubtreeSignatureInput(t *testing.T) {
 	hash := sha256.Sum256([]byte("subtree"))
 	logID := []byte("test-log")
+	cosignerID := []byte("cosigner-42")
 
-	input, err := BuildSubtreeSignatureInput(42, logID, 100, 200, hash[:])
+	input, err := BuildSubtreeSignatureInput(cosignerID, logID, 100, 200, hash[:])
 	if err != nil {
 		t.Fatalf("BuildSubtreeSignatureInput: %v", err)
 	}
@@ -319,12 +320,13 @@ func TestBuildSubtreeSignatureInput(t *testing.T) {
 	}
 
 	// Verify cosigner ID.
-	if binary.BigEndian.Uint16(input[16:18]) != 42 {
+	off := 16
+	if !bytes.Equal(input[off:off+len(cosignerID)], cosignerID) {
 		t.Error("cosigner ID mismatch")
 	}
+	off += len(cosignerID)
 
 	// Verify log ID.
-	off := 18
 	if !bytes.Equal(input[off:off+len(logID)], logID) {
 		t.Error("log ID mismatch")
 	}
@@ -349,7 +351,7 @@ func TestBuildSubtreeSignatureInput(t *testing.T) {
 }
 
 func TestBuildSubtreeSignatureInputWrongHashSize(t *testing.T) {
-	_, err := BuildSubtreeSignatureInput(0, []byte("log"), 0, 1, []byte{0x01, 0x02})
+	_, err := BuildSubtreeSignatureInput([]byte("cosigner"), []byte("log"), 0, 1, []byte{0x01, 0x02})
 	if err == nil {
 		t.Fatal("expected error for wrong hash size")
 	}
@@ -357,8 +359,8 @@ func TestBuildSubtreeSignatureInputWrongHashSize(t *testing.T) {
 
 func TestNullEntryBytes(t *testing.T) {
 	b := NullEntryBytes()
-	if !bytes.Equal(b, []byte{0x00}) {
-		t.Fatalf("NullEntryBytes() = %x, want 00", b)
+	if !bytes.Equal(b, []byte{0x00, 0x00}) {
+		t.Fatalf("NullEntryBytes() = %x, want 0000", b)
 	}
 }
 

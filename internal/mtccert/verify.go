@@ -23,8 +23,8 @@ type CosignerKey struct {
 
 // VerifyOptions configures how MTC certificate verification works.
 type VerifyOptions struct {
-	// CosignerKeys maps cosigner ID → public key for signed mode verification.
-	CosignerKeys map[uint16]CosignerKey
+	// CosignerKeys maps cosigner TrustAnchorID (hex-encoded) → public key for signed mode verification.
+	CosignerKeys map[string]CosignerKey
 
 	// Landmarks maps tree_size → root hash for signatureless mode verification.
 	Landmarks map[int64]merkle.Hash
@@ -67,10 +67,14 @@ func VerifyMTCCert(certDER []byte, opts VerifyOptions) (*VerifyResult, error) {
 		return nil, fmt.Errorf("verify: reconstruct log entry: %w", err)
 	}
 
-	// Step 3: Wrap in MerkleTreeCertEntry.
+	// Step 3: Strip outer SEQUENCE envelope (contents octets per §5.3) and wrap in MerkleTreeCertEntry.
+	contentsOctets, err := mtcformat.DERContentsOctets(logEntryDER)
+	if err != nil {
+		return nil, fmt.Errorf("verify: strip DER envelope: %w", err)
+	}
 	mtcEntry := &mtcformat.MerkleTreeCertEntry{
 		Type: mtcformat.EntryTypeTBSCert,
-		Data: logEntryDER,
+		Data: contentsOctets,
 	}
 	entryBytes, err := mtcformat.MarshalEntry(mtcEntry)
 	if err != nil {

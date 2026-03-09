@@ -21,27 +21,30 @@ import (
 // TBSCertificateLogEntry is the ASN.1 structure that gets hashed into the
 // Merkle tree as part of a MerkleTreeCertEntry (§5.3).
 //
-// It differs from a standard X.509 TBSCertificate in two ways:
+// It differs from a standard X.509 TBSCertificate in these ways:
 //   - Uses subjectPublicKeyInfoHash (SHA-256 of SPKI DER) instead of the full SPKI
+//   - Includes subjectPublicKeyAlgorithm (the AlgorithmIdentifier from the SPKI)
 //   - Does not include serialNumber (the leaf index serves as the serial)
 //
 //	TBSCertificateLogEntry ::= SEQUENCE {
-//	    version                  [0] EXPLICIT Version DEFAULT v1,
-//	    issuer                   Name,
-//	    validity                 Validity,
-//	    subject                  Name,
-//	    subjectPublicKeyInfoHash OCTET STRING,
-//	    issuerUniqueID           [1] IMPLICIT UniqueIdentifier OPTIONAL,
-//	    subjectUniqueID          [2] IMPLICIT UniqueIdentifier OPTIONAL,
-//	    extensions               [3] EXPLICIT Extensions OPTIONAL
+//	    version                    [0] EXPLICIT Version DEFAULT v1,
+//	    issuer                     Name,
+//	    validity                   Validity,
+//	    subject                    Name,
+//	    subjectPublicKeyAlgorithm  AlgorithmIdentifier,
+//	    subjectPublicKeyInfoHash   OCTET STRING,
+//	    issuerUniqueID             [1] IMPLICIT UniqueIdentifier OPTIONAL,
+//	    subjectUniqueID            [2] IMPLICIT UniqueIdentifier OPTIONAL,
+//	    extensions                 [3] EXPLICIT Extensions OPTIONAL
 //	}
 type TBSCertificateLogEntry struct {
-	Version                  int             `asn1:"optional,explicit,tag:0,default:0"`
-	Issuer                   asn1.RawValue   `asn1:""`
-	Validity                 validity        `asn1:""`
-	Subject                  asn1.RawValue   `asn1:""`
-	SubjectPublicKeyInfoHash []byte          `asn1:""`
-	Extensions               []pkix.Extension `asn1:"optional,explicit,tag:3"`
+	Version                    int             `asn1:"optional,explicit,tag:0,default:0"`
+	Issuer                     asn1.RawValue   `asn1:""`
+	Validity                   validity        `asn1:""`
+	Subject                    asn1.RawValue   `asn1:""`
+	SubjectPublicKeyAlgorithm  asn1.RawValue   `asn1:""`
+	SubjectPublicKeyInfoHash   []byte          `asn1:""`
+	Extensions                 []pkix.Extension `asn1:"optional,explicit,tag:3"`
 }
 
 // validity mirrors the X.509 Validity ASN.1 structure.
@@ -65,13 +68,21 @@ func BuildLogEntry(issuerRaw, subjectRaw asn1.RawValue, notBefore, notAfter time
 
 	spkiHash := sha256.Sum256(spkiDER)
 
+	// Extract the AlgorithmIdentifier from SubjectPublicKeyInfo.
+	// SubjectPublicKeyInfo ::= SEQUENCE { algorithm AlgorithmIdentifier, subjectPublicKey BIT STRING }
+	spkiAlg, err := extractSPKIAlgorithm(spkiDER)
+	if err != nil {
+		return nil, fmt.Errorf("mtcformat: extract SPKI algorithm: %w", err)
+	}
+
 	entry := TBSCertificateLogEntry{
-		Version:                  2, // v3 = integer value 2
-		Issuer:                   issuerRaw,
-		Validity:                 validity{NotBefore: notBefore, NotAfter: notAfter},
-		Subject:                  subjectRaw,
-		SubjectPublicKeyInfoHash: spkiHash[:],
-		Extensions:               extensions,
+		Version:                    2, // v3 = integer value 2
+		Issuer:                     issuerRaw,
+		Validity:                   validity{NotBefore: notBefore, NotAfter: notAfter},
+		Subject:                    subjectRaw,
+		SubjectPublicKeyAlgorithm:  spkiAlg,
+		SubjectPublicKeyInfoHash:   spkiHash[:],
+		Extensions:                 extensions,
 	}
 
 	der, err := asn1.Marshal(entry)
@@ -82,13 +93,39 @@ func BuildLogEntry(issuerRaw, subjectRaw asn1.RawValue, notBefore, notAfter time
 	return der, nil
 }
 
+// extractSPKIAlgorithm extracts the AlgorithmIdentifier from a DER-encoded
+// SubjectPublicKeyInfo. The SPKI is a SEQUENCE whose first element is the
+// AlgorithmIdentifier.
+func extractSPKIAlgorithm(spkiDER []byte) (asn1.RawValue, error) {
+	var spki asn1.RawValue
+	if _, err := asn1.Unmarshal(spkiDER, &spki); err != nil {
+		return asn1.RawValue{}, fmt.Errorf("unmarshal SPKI outer: %w", err)
+	}
+
+	// Parse first field of the SEQUENCE (the AlgorithmIdentifier).
+	var algID asn1.RawValue
+	if _, err := asn1.Unmarshal(spki.Bytes, &algID); err != nil {
+		return asn1.RawValue{}, fmt.Errorf("unmarshal AlgorithmIdentifier: %w", err)
+	}
+
+	// Re-encode to get complete FullBytes.
+	encoded, err := asn1.Marshal(algID)
+	if err != nil {
+		return asn1.RawValue{}, fmt.Errorf("re-encode AlgorithmIdentifier: %w", err)
+	}
+
+	return asn1.RawValue{FullBytes: encoded}, nil
+}
+
 // BuildLogEntryFromCSR constructs a TBSCertificateLogEntry from a CSR and CA info.
 // This is the primary entry point for the local CA flow during pre-certificate creation.
-func BuildLogEntryFromCSR(issuerName pkix.Name, notBefore, notAfter time.Time, csr *x509.CertificateRequest, dnsNames []string) ([]byte, error) {
-	// Marshal the issuer Name to DER.
-	issuerDER, err := asn1.Marshal(issuerName.ToRDNSequence())
+// The logID parameter is the log's trust anchor identifier, used to construct the
+// spec-compliant issuer DN per §5.2.
+func BuildLogEntryFromCSR(logID string, notBefore, notAfter time.Time, csr *x509.CertificateRequest, dnsNames []string) ([]byte, error) {
+	// Build the issuer DN using the trust anchor ID format per §5.2.
+	issuerRaw, err := BuildTrustAnchorDN(logID)
 	if err != nil {
-		return nil, fmt.Errorf("mtcformat: marshal issuer: %w", err)
+		return nil, fmt.Errorf("mtcformat: build issuer DN: %w", err)
 	}
 
 	// Marshal the subject Name to DER.
@@ -133,7 +170,6 @@ func BuildLogEntryFromCSR(issuerName pkix.Name, notBefore, notAfter time.Time, c
 	}
 	extensions = append(extensions, bcExt)
 
-	issuerRaw := asn1.RawValue{FullBytes: issuerDER}
 	subjectRaw := asn1.RawValue{FullBytes: subjectDER}
 
 	return BuildLogEntry(issuerRaw, subjectRaw, notBefore, notAfter, csr.RawSubjectPublicKeyInfo, extensions)
@@ -163,13 +199,20 @@ func BuildLogEntryFromCert(cert *x509.Certificate) ([]byte, error) {
 		return nil, fmt.Errorf("mtcformat: extract issuer/subject: %w", err)
 	}
 
+	// Extract the AlgorithmIdentifier from the SPKI.
+	spkiAlg, err := extractSPKIAlgorithm(cert.RawSubjectPublicKeyInfo)
+	if err != nil {
+		return nil, fmt.Errorf("mtcformat: extract SPKI algorithm: %w", err)
+	}
+
 	entry := TBSCertificateLogEntry{
-		Version:                  2,
-		Issuer:                   issuerRaw,
-		Validity:                 validity{NotBefore: cert.NotBefore, NotAfter: cert.NotAfter},
-		Subject:                  subjectRaw,
-		SubjectPublicKeyInfoHash: spkiHash[:],
-		Extensions:               extensions,
+		Version:                    2,
+		Issuer:                     issuerRaw,
+		Validity:                   validity{NotBefore: cert.NotBefore, NotAfter: cert.NotAfter},
+		Subject:                    subjectRaw,
+		SubjectPublicKeyAlgorithm:  spkiAlg,
+		SubjectPublicKeyInfoHash:   spkiHash[:],
+		Extensions:                 extensions,
 	}
 
 	der, err := asn1.Marshal(entry)
@@ -358,12 +401,77 @@ func countTrailingZeros(b byte) int {
 }
 
 // NullEntryBytes returns the wire-format bytes for a null_entry (index 0).
+// This is a 2-byte uint16 big-endian encoding of EntryTypeNull (0).
 func NullEntryBytes() []byte {
-	return []byte{EntryTypeNull}
+	return []byte{0x00, 0x00}
 }
 
 // SerialFromLeafIndex converts a leaf index to an X.509 serial number.
 // Per MTC spec §6.1, the serial number is the zero-based leaf index.
 func SerialFromLeafIndex(leafIndex int64) *big.Int {
 	return big.NewInt(leafIndex)
+}
+
+// BuildTrustAnchorDN constructs an X.509 Name containing a single RDN with
+// the id-rdna-trustAnchorID attribute (§5.2). For experimental use, the value
+// is encoded as a UTF8String containing the log ID's ASCII representation.
+//
+// Example: log ID "32473.1" → DN with single attribute:
+//
+//	type = 1.3.6.1.4.1.44363.47.1
+//	value = UTF8String "32473.1"
+func BuildTrustAnchorDN(logID string) (asn1.RawValue, error) {
+	// Encode the log ID as a UTF8String attribute value.
+	attrValue, err := asn1.Marshal(asn1.RawValue{
+		Tag:   asn1.TagUTF8String,
+		Class: asn1.ClassUniversal,
+		Bytes: []byte(logID),
+	})
+	if err != nil {
+		return asn1.RawValue{}, fmt.Errorf("mtcformat: marshal trust anchor value: %w", err)
+	}
+
+	// Build the AttributeTypeAndValue: SEQUENCE { OID, UTF8String }
+	atv, err := asn1.Marshal([]asn1.RawValue{
+		{FullBytes: mustMarshal(OIDTrustAnchorID)},
+		{FullBytes: attrValue},
+	})
+	if err != nil {
+		return asn1.RawValue{}, fmt.Errorf("mtcformat: marshal ATV: %w", err)
+	}
+
+	// Wrap in SET (RDN = SET OF AttributeTypeAndValue)
+	rdn := asn1.RawValue{
+		Tag:        asn1.TagSet,
+		Class:      asn1.ClassUniversal,
+		IsCompound: true,
+		Bytes:      atv,
+	}
+	rdnBytes, err := asn1.Marshal(rdn)
+	if err != nil {
+		return asn1.RawValue{}, fmt.Errorf("mtcformat: marshal RDN: %w", err)
+	}
+
+	// Wrap in SEQUENCE (Name = SEQUENCE OF RDN)
+	nameSeq := asn1.RawValue{
+		Tag:        asn1.TagSequence,
+		Class:      asn1.ClassUniversal,
+		IsCompound: true,
+		Bytes:      rdnBytes,
+	}
+	nameBytes, err := asn1.Marshal(nameSeq)
+	if err != nil {
+		return asn1.RawValue{}, fmt.Errorf("mtcformat: marshal Name: %w", err)
+	}
+
+	return asn1.RawValue{FullBytes: nameBytes}, nil
+}
+
+// mustMarshal marshals v or panics. Used for OIDs which are known-good.
+func mustMarshal(v interface{}) []byte {
+	b, err := asn1.Marshal(v)
+	if err != nil {
+		panic("mtcformat: marshal known-good value: " + err.Error())
+	}
+	return b
 }

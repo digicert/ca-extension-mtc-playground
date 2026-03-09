@@ -9,37 +9,46 @@
 package mtcformat
 
 import (
+	"encoding/asn1"
 	"encoding/binary"
 	"fmt"
 )
 
 // MerkleTreeCertEntry types per MTC spec §5.3.
+// The enum is uint16 per TLS presentation language: enum { ..., (2^16-1) }.
 const (
-	EntryTypeNull    uint8 = 0 // null_entry: sentinel at index 0
-	EntryTypeTBSCert uint8 = 1 // tbs_cert_entry: DER of TBSCertificateLogEntry
+	EntryTypeNull    uint16 = 0 // null_entry: sentinel at index 0
+	EntryTypeTBSCert uint16 = 1 // tbs_cert_entry: contents octets of TBSCertificateLogEntry DER
 )
 
 // MerkleTreeCertEntry is the leaf structure hashed into the Merkle tree.
 //
 // Wire format (TLS presentation language):
 //
+//	enum {
+//	    null_entry(0), tbs_cert_entry(1), (2^16-1)
+//	} MerkleTreeCertEntryType;
+//
 //	struct {
-//	    MerkleTreeCertEntryType type;     // 1 byte
+//	    MerkleTreeCertEntryType type;     // 2 bytes (uint16)
 //	    select (type) {
 //	        case null_entry: Empty;
 //	        case tbs_cert_entry: opaque tbs_cert_entry_data<1..2^24-1>;
 //	    }
 //	} MerkleTreeCertEntry;
 type MerkleTreeCertEntry struct {
-	Type uint8
-	Data []byte // empty for null_entry; DER of TBSCertificateLogEntry for tbs_cert_entry
+	Type uint16
+	Data []byte // empty for null_entry; contents octets of TBSCertificateLogEntry DER for tbs_cert_entry
 }
 
 // MarshalEntry encodes a MerkleTreeCertEntry to its wire format.
 func MarshalEntry(e *MerkleTreeCertEntry) ([]byte, error) {
 	switch e.Type {
 	case EntryTypeNull:
-		return []byte{EntryTypeNull}, nil
+		// 2-byte type field only (uint16 big-endian).
+		buf := make([]byte, 2)
+		binary.BigEndian.PutUint16(buf, EntryTypeNull)
+		return buf, nil
 
 	case EntryTypeTBSCert:
 		if len(e.Data) == 0 {
@@ -48,13 +57,13 @@ func MarshalEntry(e *MerkleTreeCertEntry) ([]byte, error) {
 		if len(e.Data) > 0xFFFFFF {
 			return nil, fmt.Errorf("mtcformat: tbs_cert_entry data too large (%d bytes)", len(e.Data))
 		}
-		// 1 byte type + 3 byte length + data
-		buf := make([]byte, 1+3+len(e.Data))
-		buf[0] = EntryTypeTBSCert
-		buf[1] = byte(len(e.Data) >> 16)
-		buf[2] = byte(len(e.Data) >> 8)
-		buf[3] = byte(len(e.Data))
-		copy(buf[4:], e.Data)
+		// 2 byte type + 3 byte length + data
+		buf := make([]byte, 2+3+len(e.Data))
+		binary.BigEndian.PutUint16(buf[0:2], EntryTypeTBSCert)
+		buf[2] = byte(len(e.Data) >> 16)
+		buf[3] = byte(len(e.Data) >> 8)
+		buf[4] = byte(len(e.Data))
+		copy(buf[5:], e.Data)
 		return buf, nil
 
 	default:
@@ -64,51 +73,53 @@ func MarshalEntry(e *MerkleTreeCertEntry) ([]byte, error) {
 
 // UnmarshalEntry decodes a MerkleTreeCertEntry from wire format.
 func UnmarshalEntry(data []byte) (*MerkleTreeCertEntry, error) {
-	if len(data) == 0 {
-		return nil, fmt.Errorf("mtcformat: empty entry data")
+	if len(data) < 2 {
+		return nil, fmt.Errorf("mtcformat: entry data too short for type field (%d bytes)", len(data))
 	}
 
-	switch data[0] {
+	entryType := binary.BigEndian.Uint16(data[0:2])
+
+	switch entryType {
 	case EntryTypeNull:
-		if len(data) != 1 {
-			return nil, fmt.Errorf("mtcformat: null_entry has trailing data (%d bytes)", len(data)-1)
+		if len(data) != 2 {
+			return nil, fmt.Errorf("mtcformat: null_entry has trailing data (%d bytes)", len(data)-2)
 		}
 		return &MerkleTreeCertEntry{Type: EntryTypeNull}, nil
 
 	case EntryTypeTBSCert:
-		if len(data) < 4 {
+		if len(data) < 5 {
 			return nil, fmt.Errorf("mtcformat: tbs_cert_entry too short for length prefix")
 		}
-		dataLen := int(data[1])<<16 | int(data[2])<<8 | int(data[3])
+		dataLen := int(data[2])<<16 | int(data[3])<<8 | int(data[4])
 		if dataLen == 0 {
 			return nil, fmt.Errorf("mtcformat: tbs_cert_entry has zero length")
 		}
-		if len(data) < 4+dataLen {
-			return nil, fmt.Errorf("mtcformat: tbs_cert_entry truncated: need %d bytes, have %d", 4+dataLen, len(data))
+		if len(data) < 5+dataLen {
+			return nil, fmt.Errorf("mtcformat: tbs_cert_entry truncated: need %d bytes, have %d", 5+dataLen, len(data))
 		}
-		if len(data) > 4+dataLen {
+		if len(data) > 5+dataLen {
 			return nil, fmt.Errorf("mtcformat: tbs_cert_entry has trailing data")
 		}
 		return &MerkleTreeCertEntry{
 			Type: EntryTypeTBSCert,
-			Data: data[4 : 4+dataLen],
+			Data: data[5 : 5+dataLen],
 		}, nil
 
 	default:
-		return nil, fmt.Errorf("mtcformat: unknown entry type %d", data[0])
+		return nil, fmt.Errorf("mtcformat: unknown entry type %d", entryType)
 	}
 }
 
-// MTCSignature pairs a cosigner ID with its signature bytes.
+// MTCSignature pairs a cosigner's trust anchor ID with its signature bytes.
 //
-// Wire format:
+// Wire format (per draft-ietf-plants-merkle-tree-certs-02):
 //
 //	struct {
-//	    uint16 cosigner_id;
+//	    TrustAnchorID cosigner_id<1..255>;
 //	    opaque signature<0..2^16-1>;
 //	} MTCSignature;
 type MTCSignature struct {
-	CosignerID uint16
+	CosignerID []byte // variable-length TrustAnchorID (1..255 bytes)
 	Signature  []byte
 }
 
@@ -249,6 +260,7 @@ func UnmarshalProof(data []byte) (*MTCProof, error) {
 }
 
 // marshalSignatures encodes a slice of MTCSignature into their concatenated wire format.
+// Each signature is: 1-byte cosigner_id length + cosigner_id + 2-byte sig length + sig.
 func marshalSignatures(sigs []MTCSignature) ([]byte, error) {
 	if len(sigs) == 0 {
 		return nil, nil
@@ -257,17 +269,22 @@ func marshalSignatures(sigs []MTCSignature) ([]byte, error) {
 	// Compute total size.
 	total := 0
 	for i, s := range sigs {
+		if len(s.CosignerID) == 0 || len(s.CosignerID) > 255 {
+			return nil, fmt.Errorf("mtcformat: cosigner_id %d has invalid length %d (must be 1..255)", i, len(s.CosignerID))
+		}
 		if len(s.Signature) > 0xFFFF {
 			return nil, fmt.Errorf("mtcformat: signature %d too large (%d bytes)", i, len(s.Signature))
 		}
-		total += 2 + 2 + len(s.Signature) // cosigner_id + sig_len + sig
+		total += 1 + len(s.CosignerID) + 2 + len(s.Signature) // id_len + id + sig_len + sig
 	}
 
 	buf := make([]byte, total)
 	off := 0
 	for _, s := range sigs {
-		binary.BigEndian.PutUint16(buf[off:], s.CosignerID)
-		off += 2
+		buf[off] = byte(len(s.CosignerID))
+		off++
+		copy(buf[off:], s.CosignerID)
+		off += len(s.CosignerID)
 		binary.BigEndian.PutUint16(buf[off:], uint16(len(s.Signature)))
 		off += 2
 		copy(buf[off:], s.Signature)
@@ -286,11 +303,26 @@ func unmarshalSignatures(data []byte) ([]MTCSignature, error) {
 	var sigs []MTCSignature
 	off := 0
 	for off < len(data) {
-		if off+4 > len(data) {
-			return nil, fmt.Errorf("mtcformat: truncated signature at offset %d", off)
+		// Read 1-byte cosigner_id length.
+		if off+1 > len(data) {
+			return nil, fmt.Errorf("mtcformat: truncated cosigner_id length at offset %d", off)
 		}
-		cosignerID := binary.BigEndian.Uint16(data[off:])
-		off += 2
+		idLen := int(data[off])
+		off++
+		if idLen == 0 {
+			return nil, fmt.Errorf("mtcformat: zero-length cosigner_id at offset %d", off)
+		}
+		if off+idLen > len(data) {
+			return nil, fmt.Errorf("mtcformat: truncated cosigner_id at offset %d", off)
+		}
+		cosignerID := make([]byte, idLen)
+		copy(cosignerID, data[off:off+idLen])
+		off += idLen
+
+		// Read 2-byte signature length.
+		if off+2 > len(data) {
+			return nil, fmt.Errorf("mtcformat: truncated signature length at offset %d", off)
+		}
 		sigLen := int(binary.BigEndian.Uint16(data[off:]))
 		off += 2
 		if off+sigLen > len(data) {
@@ -316,21 +348,24 @@ var MTCSubtreeLabel = [16]byte{
 
 // BuildSubtreeSignatureInput constructs the message that cosigners sign (§5.4.1):
 //
-//	label("mtc-subtree/v1\n\0") || cosigner_id (2 bytes) || log_id || start (8 bytes) || end (8 bytes) || hash (32 bytes)
-func BuildSubtreeSignatureInput(cosignerID uint16, logID []byte, start, end uint64, hash []byte) ([]byte, error) {
+//	label("mtc-subtree/v1\n\0") || cosigner_id || log_id || start (8 bytes) || end (8 bytes) || hash (32 bytes)
+func BuildSubtreeSignatureInput(cosignerID []byte, logID []byte, start, end uint64, hash []byte) ([]byte, error) {
 	if len(hash) != HashSize {
 		return nil, fmt.Errorf("mtcformat: hash must be %d bytes, got %d", HashSize, len(hash))
 	}
+	if len(cosignerID) == 0 {
+		return nil, fmt.Errorf("mtcformat: empty cosigner_id")
+	}
 
-	// Total: 16 (label) + 2 (cosigner_id) + len(logID) + 8 (start) + 8 (end) + 32 (hash)
-	buf := make([]byte, 16+2+len(logID)+8+8+HashSize)
+	// Total: 16 (label) + len(cosignerID) + len(logID) + 8 (start) + 8 (end) + 32 (hash)
+	buf := make([]byte, 16+len(cosignerID)+len(logID)+8+8+HashSize)
 	off := 0
 
 	copy(buf[off:], MTCSubtreeLabel[:])
 	off += 16
 
-	binary.BigEndian.PutUint16(buf[off:], cosignerID)
-	off += 2
+	copy(buf[off:], cosignerID)
+	off += len(cosignerID)
 
 	copy(buf[off:], logID)
 	off += len(logID)
@@ -343,4 +378,29 @@ func BuildSubtreeSignatureInput(cosignerID uint16, logID []byte, start, end uint
 	copy(buf[off:], hash)
 
 	return buf, nil
+}
+
+// DERContentsOctets strips the outer tag and length octets from a DER encoding,
+// returning only the contents octets. Per MTC spec §5.3 (-02), tbs_cert_entry_data
+// contains "the contents octets (i.e. excluding the initial identifier and length
+// octets) of the DER encoding of TBSCertificateLogEntry."
+func DERContentsOctets(der []byte) ([]byte, error) {
+	var raw asn1.RawValue
+	if _, err := asn1.Unmarshal(der, &raw); err != nil {
+		return nil, fmt.Errorf("mtcformat: strip DER envelope: %w", err)
+	}
+	return raw.Bytes, nil
+}
+
+// WrapContentsOctets re-wraps contents octets into a full DER SEQUENCE encoding.
+// This is the inverse of DERContentsOctets and is used during verification to
+// reconstruct the full DER for ASN.1 parsing.
+func WrapContentsOctets(contents []byte) ([]byte, error) {
+	raw := asn1.RawValue{
+		Tag:        asn1.TagSequence,
+		Class:      asn1.ClassUniversal,
+		IsCompound: true,
+		Bytes:      contents,
+	}
+	return asn1.Marshal(raw)
 }

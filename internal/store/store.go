@@ -215,7 +215,7 @@ var migrations = []string{
 		start_idx     BIGINT NOT NULL,
 		end_idx       BIGINT NOT NULL,
 		subtree_hash  BYTEA NOT NULL,
-		cosigner_id   SMALLINT NOT NULL,
+		cosigner_id   TEXT NOT NULL,
 		algorithm     SMALLINT NOT NULL,
 		signature     BYTEA NOT NULL,
 		checkpoint_id BIGINT,
@@ -1981,7 +1981,7 @@ type SubtreeSignature struct {
 	StartIdx     int64     `json:"start_idx"`
 	EndIdx       int64     `json:"end_idx"`
 	SubtreeHash  []byte    `json:"subtree_hash"`
-	CosignerID   int16     `json:"cosigner_id"`
+	CosignerID   string    `json:"cosigner_id"` // TrustAnchorID (ASCII string)
 	Algorithm    int16     `json:"algorithm"`
 	Signature    []byte    `json:"signature"`
 	CheckpointID *int64    `json:"checkpoint_id,omitempty"`

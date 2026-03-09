@@ -285,7 +285,7 @@ func (srv *Server) processFinalizeMTC(ctx context.Context, orderID string, csr *
 
 	// Step 1: Build TBSCertificateLogEntry from CSR fields.
 	logEntryDER, err := mtcformat.BuildLogEntryFromCSR(
-		srv.localCA.IssuerName(),
+		srv.cfg.MTCBridgeURL,
 		time.Now().UTC().Truncate(time.Second),
 		time.Now().UTC().Truncate(time.Second).Add(90*24*time.Hour),
 		csr, dnsNames,
@@ -362,7 +362,7 @@ func (srv *Server) processFinalizeMTC(ctx context.Context, orderID string, csr *
 	}
 
 	// Step 5: Build MTC certificate.
-	finalCertDER, err := srv.localCA.IssueMTCCert(csr, dnsNames, 0, leafIdx, proof)
+	finalCertDER, err := srv.localCA.IssueMTCCert(csr, dnsNames, 0, leafIdx, proof, srv.cfg.MTCBridgeURL)
 	if err != nil {
 		srv.logger.Error("acme: MTC cert build failed", "order_id", orderID, "error", err)
 		srv.store.UpdateACMEOrderStatus(ctx, orderID, "invalid", map[string]interface{}{

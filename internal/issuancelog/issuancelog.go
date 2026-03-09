@@ -63,7 +63,7 @@ func (l *Log) Initialize(ctx context.Context) error {
 		return nil
 	}
 
-	nullData := make([]byte, 2)
+	nullData := mtcformat.NullEntryBytes()
 	entry := &store.LogEntry{
 		Index:     0,
 		EntryType: EntryTypeNull,
@@ -120,12 +120,19 @@ func BuildPrecertEntry(tbsDER []byte, serialHex string) *store.LogEntry {
 }
 
 // BuildMTCEntry constructs a spec-compliant log entry from a TBSCertificateLogEntry DER.
-// The entry data is a MerkleTreeCertEntry (1-byte type + 3-byte length + DER).
+// The entry data is a MerkleTreeCertEntry (2-byte type + 3-byte length + contents octets).
 // This is what gets leaf-hashed and appended to the Merkle tree in MTC mode.
 func BuildMTCEntry(logEntryDER []byte, serialHex string) (*store.LogEntry, error) {
+	// Per MTC spec §5.3 (-02), tbs_cert_entry_data contains the contents octets
+	// (excluding the outer SEQUENCE tag and length) of the TBSCertificateLogEntry DER.
+	contentsOctets, err := mtcformat.DERContentsOctets(logEntryDER)
+	if err != nil {
+		return nil, fmt.Errorf("issuancelog.BuildMTCEntry: strip DER envelope: %w", err)
+	}
+
 	entry := &mtcformat.MerkleTreeCertEntry{
 		Type: mtcformat.EntryTypeTBSCert,
-		Data: logEntryDER,
+		Data: contentsOctets,
 	}
 	wireData, err := mtcformat.MarshalEntry(entry)
 	if err != nil {

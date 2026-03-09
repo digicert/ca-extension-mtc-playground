@@ -83,7 +83,7 @@ type Cosigner struct {
 	keyID      string
 	keyHash    uint32 // first 4 bytes of SHA-256(name || 0x0a || pubkey) — C2SP key hash
 	origin     string // log origin for checkpoint identity
-	cosignerID uint16 // numeric ID for MTCSignature (default 0)
+	cosignerID []byte // TrustAnchorID for MTCSignature (variable-length)
 }
 
 // New creates a Cosigner from a PEM-encoded Ed25519 private key file.
@@ -158,7 +158,7 @@ func NewFromSeed(seed []byte, keyID, origin string) (*Cosigner, error) {
 }
 
 // NewMLDSA creates a Cosigner from a PEM-encoded ML-DSA private key file.
-func NewMLDSA(keyFile string, algorithm SignatureAlgorithm, keyID, origin string, cosignerID uint16) (*Cosigner, error) {
+func NewMLDSA(keyFile string, algorithm SignatureAlgorithm, keyID, origin string, cosignerID []byte) (*Cosigner, error) {
 	if algorithm != AlgMLDSA44 && algorithm != AlgMLDSA65 && algorithm != AlgMLDSA87 {
 		return nil, fmt.Errorf("cosigner.NewMLDSA: expected ML-DSA algorithm, got %s", algorithm)
 	}
@@ -299,13 +299,13 @@ func (c *Cosigner) Algorithm() SignatureAlgorithm {
 	return c.algorithm
 }
 
-// CosignerID returns the numeric cosigner identifier for MTCSignature.
-func (c *Cosigner) CosignerID() uint16 {
+// CosignerID returns the cosigner's TrustAnchorID for MTCSignature.
+func (c *Cosigner) CosignerID() []byte {
 	return c.cosignerID
 }
 
-// SetCosignerID sets the numeric cosigner identifier.
-func (c *Cosigner) SetCosignerID(id uint16) {
+// SetCosignerID sets the cosigner's TrustAnchorID.
+func (c *Cosigner) SetCosignerID(id []byte) {
 	c.cosignerID = id
 }
 

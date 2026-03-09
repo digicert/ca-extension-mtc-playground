@@ -209,15 +209,15 @@ func TestMLDSA65GenerateAndLoad(t *testing.T) {
 	}
 
 	// Load the key back.
-	cs, err := NewMLDSA(keyFile, AlgMLDSA65, "pq-cosigner", "test.example.com/log", 1)
+	cs, err := NewMLDSA(keyFile, AlgMLDSA65, "pq-cosigner", "test.example.com/log", []byte("cosigner-1"))
 	if err != nil {
 		t.Fatalf("NewMLDSA: %v", err)
 	}
 	if cs.Algorithm() != AlgMLDSA65 {
 		t.Errorf("algorithm = %v, want %v", cs.Algorithm(), AlgMLDSA65)
 	}
-	if cs.CosignerID() != 1 {
-		t.Errorf("cosignerID = %d, want 1", cs.CosignerID())
+	if string(cs.CosignerID()) != "cosigner-1" {
+		t.Errorf("cosignerID = %q, want %q", cs.CosignerID(), "cosigner-1")
 	}
 	if cs.KeyID() != "pq-cosigner" {
 		t.Errorf("KeyID = %q, want %q", cs.KeyID(), "pq-cosigner")
@@ -233,7 +233,7 @@ func TestMLDSA44GenerateSignVerify(t *testing.T) {
 		t.Fatalf("GenerateMLDSAKey: %v", err)
 	}
 
-	cs, err := NewMLDSA(keyFile, AlgMLDSA44, "test44", "example.com/log", 0)
+	cs, err := NewMLDSA(keyFile, AlgMLDSA44, "test44", "example.com/log", []byte("cosigner-0"))
 	if err != nil {
 		t.Fatalf("NewMLDSA: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestMLDSA65SignVerify(t *testing.T) {
 		t.Fatalf("GenerateMLDSAKey: %v", err)
 	}
 
-	cs, err := NewMLDSA(keyFile, AlgMLDSA65, "test65", "example.com/log", 1)
+	cs, err := NewMLDSA(keyFile, AlgMLDSA65, "test65", "example.com/log", []byte("cosigner-1"))
 	if err != nil {
 		t.Fatalf("NewMLDSA: %v", err)
 	}
@@ -286,7 +286,7 @@ func TestMLDSA87SignVerify(t *testing.T) {
 		t.Fatalf("GenerateMLDSAKey: %v", err)
 	}
 
-	cs, err := NewMLDSA(keyFile, AlgMLDSA87, "test87", "example.com/log", 2)
+	cs, err := NewMLDSA(keyFile, AlgMLDSA87, "test87", "example.com/log", []byte("cosigner-2"))
 	if err != nil {
 		t.Fatalf("NewMLDSA: %v", err)
 	}
@@ -310,7 +310,7 @@ func TestMLDSACheckpoint(t *testing.T) {
 		t.Fatalf("GenerateMLDSAKey: %v", err)
 	}
 
-	cs, err := NewMLDSA(keyFile, AlgMLDSA65, "pq-cosigner", "test.example.com/log", 1)
+	cs, err := NewMLDSA(keyFile, AlgMLDSA65, "pq-cosigner", "test.example.com/log", []byte("cosigner-1"))
 	if err != nil {
 		t.Fatalf("NewMLDSA: %v", err)
 	}
@@ -342,7 +342,7 @@ func TestMLDSASubtreeLegacy(t *testing.T) {
 		t.Fatalf("GenerateMLDSAKey: %v", err)
 	}
 
-	cs, err := NewMLDSA(keyFile, AlgMLDSA65, "pq-cosigner", "example.com/log", 0)
+	cs, err := NewMLDSA(keyFile, AlgMLDSA65, "pq-cosigner", "example.com/log", []byte("cosigner-0"))
 	if err != nil {
 		t.Fatalf("NewMLDSA: %v", err)
 	}
@@ -367,7 +367,7 @@ func TestSignSubtreeMTC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewFromSeed: %v", err)
 	}
-	ed25519CS.SetCosignerID(0)
+	ed25519CS.SetCosignerID([]byte("ed-cosigner-id"))
 
 	logID := []byte("test-log-id-0123456789abcdef")
 	hash := merkle.LeafHash([]byte("subtree data"))
@@ -376,8 +376,8 @@ func TestSignSubtreeMTC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SignSubtreeMTC (ed25519): %v", err)
 	}
-	if mtcSig.CosignerID != 0 {
-		t.Errorf("cosigner ID = %d, want 0", mtcSig.CosignerID)
+	if string(mtcSig.CosignerID) != "ed-cosigner-id" {
+		t.Errorf("cosigner ID = %q, want %q", mtcSig.CosignerID, "ed-cosigner-id")
 	}
 	if !ed25519CS.VerifySubtreeMTC(logID, 0, 100, hash, mtcSig) {
 		t.Error("VerifySubtreeMTC (ed25519) failed")
@@ -396,7 +396,7 @@ func TestSignSubtreeMTC(t *testing.T) {
 		t.Fatalf("GenerateMLDSAKey: %v", err)
 	}
 
-	mldsaCS, err := NewMLDSA(keyFile, AlgMLDSA65, "pq-cosigner", "example.com/log", 1)
+	mldsaCS, err := NewMLDSA(keyFile, AlgMLDSA65, "pq-cosigner", "example.com/log", []byte("pq-cosigner-id"))
 	if err != nil {
 		t.Fatalf("NewMLDSA: %v", err)
 	}
@@ -405,8 +405,8 @@ func TestSignSubtreeMTC(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SignSubtreeMTC (mldsa65): %v", err)
 	}
-	if mtcSig2.CosignerID != 1 {
-		t.Errorf("cosigner ID = %d, want 1", mtcSig2.CosignerID)
+	if string(mtcSig2.CosignerID) != "pq-cosigner-id" {
+		t.Errorf("cosigner ID = %q, want %q", mtcSig2.CosignerID, "pq-cosigner-id")
 	}
 	if !mldsaCS.VerifySubtreeMTC(logID, 0, 100, hash, mtcSig2) {
 		t.Error("VerifySubtreeMTC (mldsa65) failed")
@@ -428,7 +428,7 @@ func TestSignSubtreeMTCSignatureFormat(t *testing.T) {
 		t.Fatalf("GenerateMLDSAKey: %v", err)
 	}
 
-	cs, err := NewMLDSA(keyFile, AlgMLDSA65, "pq-cosigner", "example.com/log", 42)
+	cs, err := NewMLDSA(keyFile, AlgMLDSA65, "pq-cosigner", "example.com/log", []byte("cosigner-42"))
 	if err != nil {
 		t.Fatalf("NewMLDSA: %v", err)
 	}
@@ -462,8 +462,8 @@ func TestSignSubtreeMTCSignatureFormat(t *testing.T) {
 	if len(decoded.Signatures) != 1 {
 		t.Fatalf("expected 1 signature, got %d", len(decoded.Signatures))
 	}
-	if decoded.Signatures[0].CosignerID != 42 {
-		t.Errorf("cosigner ID = %d, want 42", decoded.Signatures[0].CosignerID)
+	if string(decoded.Signatures[0].CosignerID) != "cosigner-42" {
+		t.Errorf("cosigner ID = %q, want %q", decoded.Signatures[0].CosignerID, "cosigner-42")
 	}
 
 	// Verify the signature from the round-tripped proof.
@@ -482,7 +482,7 @@ func TestGenerateMLDSAKeyBadAlgorithm(t *testing.T) {
 }
 
 func TestNewMLDSABadAlgorithm(t *testing.T) {
-	_, err := NewMLDSA("/dev/null", AlgEd25519, "key", "origin", 0)
+	_, err := NewMLDSA("/dev/null", AlgEd25519, "key", "origin", []byte("id"))
 	if err == nil {
 		t.Error("expected error for non-ML-DSA algorithm")
 	}
@@ -500,7 +500,7 @@ func TestPublicKeyBytes(t *testing.T) {
 	dir := t.TempDir()
 	keyFile := filepath.Join(dir, "mldsa65.key")
 	_, _ = GenerateMLDSAKey(keyFile, AlgMLDSA65)
-	mldsaCS, _ := NewMLDSA(keyFile, AlgMLDSA65, "key", "origin", 0)
+	mldsaCS, _ := NewMLDSA(keyFile, AlgMLDSA65, "key", "origin", []byte("id"))
 	if len(mldsaCS.PublicKeyBytes()) == 0 {
 		t.Error("ML-DSA-65 PublicKeyBytes is empty")
 	}

@@ -136,16 +136,10 @@ func TestBuildLogEntryFromCSR(t *testing.T) {
 		t.Fatalf("parse CSR: %v", err)
 	}
 
-	issuerName := pkix.Name{
-		CommonName:   "MTC Test CA",
-		Organization: []string{"MTC Test"},
-		Country:      []string{"US"},
-	}
-
 	notBefore := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
 	notAfter := time.Date(2027, 3, 1, 0, 0, 0, 0, time.UTC)
 
-	logEntryDER, err := BuildLogEntryFromCSR(issuerName, notBefore, notAfter, csr, []string{"csr-test.example.com"})
+	logEntryDER, err := BuildLogEntryFromCSR("test-log", notBefore, notAfter, csr, []string{"csr-test.example.com"})
 	if err != nil {
 		t.Fatalf("BuildLogEntryFromCSR: %v", err)
 	}
@@ -245,18 +239,23 @@ func TestMerkleTreeCertEntryRoundTrip(t *testing.T) {
 		t.Fatalf("parse CSR: %v", err)
 	}
 
-	issuer := pkix.Name{CommonName: "Test CA", Country: []string{"US"}}
 	now := time.Now().UTC().Truncate(time.Second)
 
-	logEntryDER, err := BuildLogEntryFromCSR(issuer, now, now.Add(365*24*time.Hour), csr, []string{"roundtrip.example.com"})
+	logEntryDER, err := BuildLogEntryFromCSR("test-log", now, now.Add(365*24*time.Hour), csr, []string{"roundtrip.example.com"})
 	if err != nil {
 		t.Fatalf("BuildLogEntryFromCSR: %v", err)
+	}
+
+	// Strip outer SEQUENCE envelope per §5.3 (contents octets only).
+	contentsOctets, err := DERContentsOctets(logEntryDER)
+	if err != nil {
+		t.Fatalf("DERContentsOctets: %v", err)
 	}
 
 	// Wrap in MerkleTreeCertEntry.
 	entry := &MerkleTreeCertEntry{
 		Type: EntryTypeTBSCert,
-		Data: logEntryDER,
+		Data: contentsOctets,
 	}
 
 	entryBytes, err := MarshalEntry(entry)
@@ -274,9 +273,15 @@ func TestMerkleTreeCertEntryRoundTrip(t *testing.T) {
 		t.Fatalf("type: got %d, want %d", parsed.Type, EntryTypeTBSCert)
 	}
 
-	// Verify the inner DER can be parsed as TBSCertificateLogEntry.
+	// Re-wrap contents octets into full DER for ASN.1 parsing.
+	fullDER, err := WrapContentsOctets(parsed.Data)
+	if err != nil {
+		t.Fatalf("WrapContentsOctets: %v", err)
+	}
+
+	// Verify the reconstructed DER can be parsed as TBSCertificateLogEntry.
 	var logEntry TBSCertificateLogEntry
-	rest, err := asn1.Unmarshal(parsed.Data, &logEntry)
+	rest, err := asn1.Unmarshal(fullDER, &logEntry)
 	if err != nil {
 		t.Fatalf("unmarshal inner TBSCertificateLogEntry: %v", err)
 	}

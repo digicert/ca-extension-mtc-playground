@@ -24,3 +24,11 @@ import "encoding/asn1"
 //
 // Experimental OID arc: 1.3.6.1.4.1.44363.47.0
 var OIDMTCProof = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 44363, 47, 0}
+
+// OIDTrustAnchorID is id-rdna-trustAnchorID per the MTC specification (§5.2).
+// Used to encode the log's trust anchor identifier in the issuer DN.
+// The issuer Name of an MTC certificate contains a single RDN with this
+// attribute type and the log ID as the value (UTF8String for experimental use).
+//
+// Experimental OID arc: 1.3.6.1.4.1.44363.47.1
+var OIDTrustAnchorID = asn1.ObjectIdentifier{1, 3, 6, 1, 4, 1, 44363, 47, 1}
