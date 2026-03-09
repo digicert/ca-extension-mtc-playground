@@ -32,9 +32,9 @@ X.509 extensions is also available for backward compatibility.
 |---|---|---|
 | **MTC certificate format** | MTC §4 | `signatureAlgorithm = id-alg-mtcProof`, `signatureValue = MTCProof` |
 | **TBSCertificateLogEntry** | MTC §5.3 | ASN.1 structure with SHA-256(SPKI) instead of full public key |
-| **MerkleTreeCertEntry encoding** | MTC §5.3 | TLS presentation language: 1-byte type + 3-byte length + DER |
+| **MerkleTreeCertEntry encoding** | MTC §5.3 | TLS presentation language: 2-byte (uint16) type + 3-byte length + contents octets |
 | **MTCProof binary format** | MTC §5.4 | uint64 start/end, length-prefixed inclusion proof + signatures |
-| **MTCSignature encoding** | MTC §5.4 | uint16 cosigner_id + 2-byte length prefix + signature bytes |
+| **MTCSignature encoding** | MTC §5.4 | TrustAnchorID cosigner_id\<1..255\> + opaque signature\<0..2^16-1\> |
 | **Multi-cosigner subtree signing** | MTC §5.4.1 | Spec-compliant `mtc-subtree/v1` signing format |
 | **ML-DSA post-quantum cosigning** | MTC §5.5 | ML-DSA-44/65/87 via cloudflare/circl alongside Ed25519 |
 | **Batch/subtree infrastructure** | MTC §5.4 | Batch accumulation with multi-cosigner subtree signing |
@@ -1351,9 +1351,47 @@ make test
 # Conformance tests (29 tests including MTC-spec, requires a running mtc-bridge instance)
 make conformance
 
+# Interop validation against bwesterb/mtc reference implementation (standalone, no server needed)
+make interop
+
 # Go vet
 make vet
 ```
+
+### Interop Validation
+
+The `make interop` target cross-validates our implementation against the
+[bwesterb/mtc](https://github.com/bwesterb/mtc) reference implementation
+(Cloudflare's MTC library by Bas Westerbaan). It runs 12 tests:
+
+| Test | What it validates |
+|---|---|
+| RFC 9162 Leaf Hash | `SHA-256(0x00 \|\| data)` matches manual computation |
+| RFC 9162 Interior Hash | `SHA-256(0x01 \|\| left \|\| right)` matches manual computation |
+| RFC 9162 Tree Root (pow2) | 4-entry tree root matches hand-computed result |
+| RFC 9162 Tree Root (non-pow2) | 5-entry tree root with split-point logic |
+| RFC 9162 Tree Root (various) | Trees of size 1–257 produce deterministic non-zero roots |
+| Inclusion Proof Cross-Validation | Proofs for trees of size 1–100 verify via independent recursive walk |
+| Reference CA Roundtrip | Creates a bwesterb/mtc CA (ML-DSA-87), queues 5 assertions, issues a batch |
+| Wire Format Null Entry | `MerkleTreeCertEntry` null encoding roundtrips: `[0x00, 0x00]` |
+| Wire Format TBS Entry | `MerkleTreeCertEntry` TBS encoding: uint16 BE type + 3-byte BE length + data |
+| Wire Format MTCProof | `MTCProof` marshal/unmarshal with start/end, proof hashes, and signatures |
+| Wire Format MTCSignature | Multiple signatures with varying cosigner ID lengths + signatureless mode |
+| Reference Tree Auth Path | Builds an 8-leaf tree via bwesterb/mtc's `TreeBuilder`, verifies all auth paths |
+
+The interop tool lives at `cmd/mtc-interop/` and uses `github.com/bwesterb/mtc`
+as a Go dependency. It requires no running server or database.
+
+#### External MTC Ecosystem
+
+- **bwesterb/mtc** ([github.com/bwesterb/mtc](https://github.com/bwesterb/mtc)):
+  Cloudflare's reference Go implementation. Provides `mtc inspect` and `mtc verify`
+  CLI tools for validating MTC artifacts. Our interop tests use it as a library.
+- **Cloudflare Azul**: Tiled transparency log on Cloudflare Workers, publishing
+  MTCs for live traffic (early 2026 feasibility study with ~1,000 TLS certs).
+- **Google Chrome**: Planning MTC integration in phases — Phase 1 (feasibility
+  study, early 2026), Phase 2 (CT Log operator onboarding, Q1 2027), Phase 3
+  (Chrome Quantum-resistant Root Store, Q3 2027).
 
 ---
 

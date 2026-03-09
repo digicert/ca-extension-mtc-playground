@@ -6,7 +6,7 @@
 #
 # For commercial licensing, contact sales@digicert.com.
 
-.PHONY: build test vet lint clean run generate-key generate-local-ca conformance demo-tls demo-embedded demo-mtc docker docker-up docker-down help
+.PHONY: build test vet lint clean run generate-key generate-local-ca conformance interop demo-tls demo-embedded demo-mtc docker docker-up docker-down help
 
 # Default target
 help:
@@ -20,6 +20,7 @@ help:
 	@echo "  generate-key     Generate a new Ed25519 signing key"
 	@echo "  generate-local-ca Generate a self-signed local CA key + cert for embedded proofs"
 	@echo "  conformance      Run conformance test suite against a running server"
+	@echo "  interop          Cross-validate against bwesterb/mtc reference implementation"
 	@echo "  demo-tls         Run TLS assertion stapling demo (requires running bridge + CA)"
 	@echo "  demo-embedded    Run embedded MTC proof demo (standalone, no server needed)"
 	@echo "  demo-mtc         Run MTC-spec cert demo (id-alg-mtcProof, standalone)"
@@ -38,7 +39,8 @@ build:
 	go build -o bin/mtc-tls-verify ./cmd/mtc-tls-verify/
 	go build -o bin/mtc-verify-cert ./cmd/mtc-verify-cert/
 	go build -o bin/demo-embedded-cert ./cmd/demo-embedded-cert/
-	@echo "Built: bin/mtc-bridge, bin/mtc-conformance, bin/mtc-assertion, bin/mtc-tls-server, bin/mtc-tls-verify, bin/mtc-verify-cert, bin/demo-embedded-cert"
+	go build -o bin/mtc-interop ./cmd/mtc-interop/
+	@echo "Built: bin/mtc-bridge, bin/mtc-conformance, bin/mtc-assertion, bin/mtc-tls-server, bin/mtc-tls-verify, bin/mtc-verify-cert, bin/demo-embedded-cert, bin/mtc-interop"
 
 # Test
 test:
@@ -68,7 +70,11 @@ generate-local-ca: build
 
 # Conformance test
 conformance: build
-	./bin/mtc-conformance -url http://localhost:8080 -acme-url http://localhost:8443 -verbose
+	./bin/mtc-conformance -url http://localhost:8080 -acme-url https://localhost:8443 -verbose
+
+# Interop validation against bwesterb/mtc reference implementation
+interop: build
+	./bin/mtc-interop -verbose
 
 # TLS assertion stapling demo
 demo-tls: build

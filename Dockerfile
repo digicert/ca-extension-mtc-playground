@@ -25,6 +25,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /mtc-tls-server ./cmd/
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /mtc-tls-verify ./cmd/mtc-tls-verify/
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /mtc-verify-cert ./cmd/mtc-verify-cert/
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /demo-embedded-cert ./cmd/demo-embedded-cert/
+RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /mtc-interop ./cmd/mtc-interop/
 
 # Runtime stage
 FROM alpine:3.20
@@ -38,6 +39,7 @@ COPY --from=builder /mtc-tls-server /usr/local/bin/mtc-tls-server
 COPY --from=builder /mtc-tls-verify /usr/local/bin/mtc-tls-verify
 COPY --from=builder /mtc-verify-cert /usr/local/bin/mtc-verify-cert
 COPY --from=builder /demo-embedded-cert /usr/local/bin/demo-embedded-cert
+COPY --from=builder /mtc-interop /usr/local/bin/mtc-interop
 
 # Default config location
 COPY config.example.yaml /etc/mtc-bridge/config.yaml
