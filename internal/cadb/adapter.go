@@ -143,11 +143,20 @@ func (a *Adapter) FetchNewCertificates(ctx context.Context, afterDate time.Time,
 	return scanCertificates(rows)
 }
 
-// FetchNewRevocations detects certificates revoked since a given time.
-func (a *Adapter) FetchNewRevocations(ctx context.Context, since time.Time) ([]*RevocationEvent, error) {
-	rows, err := a.db.QueryContext(ctx, "SELECT id, serial_number, revoked_date, revoked_reason FROM certificate WHERE is_revoked = 1 AND revoked_date > ? ORDER BY revoked_date", since)
+// FetchAllRevocations returns all revoked certificates from the CA database.
+// No time filter is applied — deduplication is handled by the caller via
+// store.AddRevocation's ON CONFLICT DO NOTHING. This ensures revocations are
+// never permanently lost due to timing windows.
+func (a *Adapter) FetchAllRevocations(ctx context.Context) ([]*RevocationEvent, error) {
+	q := "SELECT id, serial_number, revoked_date, revoked_reason FROM certificate WHERE is_revoked = 1 ORDER BY revoked_date"
+	args := []interface{}{}
+	if a.cfg.IssuerID != "" {
+		q = "SELECT id, serial_number, revoked_date, revoked_reason FROM certificate WHERE is_revoked = 1 AND issuer_id = ? ORDER BY revoked_date"
+		args = []interface{}{a.cfg.IssuerID}
+	}
+	rows, err := a.db.QueryContext(ctx, q, args...)
 	if err != nil {
-		return nil, fmt.Errorf("cadb.FetchNewRevocations: %w", err)
+		return nil, fmt.Errorf("cadb.FetchAllRevocations: %w", err)
 	}
 	defer rows.Close()
 	var events []*RevocationEvent
@@ -156,7 +165,7 @@ func (a *Adapter) FetchNewRevocations(ctx context.Context, since time.Time) ([]*
 		var rd sql.NullTime
 		var rr sql.NullInt32
 		if err := rows.Scan(&e.CertID, &e.SerialNumber, &rd, &rr); err != nil {
-			return nil, fmt.Errorf("cadb.FetchNewRevocations: scan: %w", err)
+			return nil, fmt.Errorf("cadb.FetchAllRevocations: scan: %w", err)
 		}
 		if rd.Valid {
 			e.RevokedDate = rd.Time

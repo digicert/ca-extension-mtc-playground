@@ -200,10 +200,11 @@ func (w *Watcher) pollCertificates(ctx context.Context) error {
 }
 
 func (w *Watcher) pollRevocations(ctx context.Context) error {
-	// Use 24h lookback to catch any missed revocations.
-	since := time.Now().Add(-24 * time.Hour)
-
-	events, err := w.cadb.FetchNewRevocations(ctx, since)
+	// Fetch ALL revoked certs from the CA database. Deduplication is handled
+	// by store.AddRevocation's ON CONFLICT DO NOTHING, so re-processing
+	// already-known revocations is a no-op. This eliminates the previous 24h
+	// sliding window that permanently lost older revocations.
+	events, err := w.cadb.FetchAllRevocations(ctx)
 	if err != nil {
 		return fmt.Errorf("watcher: fetch revocations: %w", err)
 	}
