@@ -14,6 +14,7 @@ package admin
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
@@ -21,6 +22,8 @@ import (
 	"html/template"
 	"log/slog"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strconv"
 	"time"
 
@@ -44,10 +47,11 @@ type Handler struct {
 	tmpl      *template.Template
 	mux       *http.ServeMux
 	caNames   map[string]string
+	acmeURL   string // ACME server external URL for reverse proxy
 }
 
 // New creates a new admin Handler.
-func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOrigin string, caNames map[string]string, logger *slog.Logger) (*Handler, error) {
+func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOrigin string, caNames map[string]string, acmeExternalURL string, logger *slog.Logger) (*Handler, error) {
 	funcMap := template.FuncMap{
 		"formatTime": func(t time.Time) string {
 			if t.IsZero() {
@@ -75,6 +79,9 @@ func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOri
 	if err != nil {
 		return nil, fmt.Errorf("admin.New: parse template: %w", err)
 	}
+	if _, err := tmpl.New("acme-demo").Parse(acmeDemoHTML); err != nil {
+		return nil, fmt.Errorf("admin.New: parse acme-demo template: %w", err)
+	}
 
 	h := &Handler{
 		store:     s,
@@ -85,6 +92,7 @@ func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOri
 		tmpl:      tmpl,
 		mux:       http.NewServeMux(),
 		caNames:   caNames,
+		acmeURL:   acmeExternalURL,
 	}
 
 	h.mux.HandleFunc("GET /admin", h.handleDashboard)
@@ -107,6 +115,11 @@ func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOri
 	h.mux.HandleFunc("GET /admin/viz/consistency", h.handleVizConsistency)
 	h.mux.HandleFunc("GET /admin/checkpoints/list", h.handleCheckpointsList)
 	h.mux.HandleFunc("GET /admin/consistency-proofs", h.handleRecentConsistencyProofs)
+	h.mux.HandleFunc("GET /admin/acme-demo", h.handleACMEDemo)
+	acmeProxy := h.acmeProxy()
+	h.mux.Handle("GET /admin/acme-proxy/", acmeProxy)
+	h.mux.Handle("POST /admin/acme-proxy/", acmeProxy)
+	h.mux.Handle("HEAD /admin/acme-proxy/", acmeProxy)
 
 	return h, nil
 }
@@ -114,6 +127,39 @@ func New(s *store.Store, w *watcher.Watcher, iss *assertionissuer.Issuer, logOri
 // ServeHTTP implements http.Handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mux.ServeHTTP(w, r)
+}
+
+func (h *Handler) handleACMEDemo(w http.ResponseWriter, r *http.Request) {
+	data := struct {
+		ACMEExternalURL string
+	}{
+		ACMEExternalURL: h.acmeURL,
+	}
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := h.tmpl.ExecuteTemplate(w, "acme-demo", data); err != nil {
+		h.logger.Error("admin: render acme-demo", "error", err)
+		http.Error(w, "internal error", http.StatusInternalServerError)
+	}
+}
+
+func (h *Handler) acmeProxy() http.Handler {
+	if h.acmeURL == "" {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "ACME server not configured", http.StatusServiceUnavailable)
+		})
+	}
+	target, err := url.Parse(h.acmeURL)
+	if err != nil {
+		h.logger.Error("admin: invalid acme URL", "url", h.acmeURL, "error", err)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			http.Error(w, "ACME proxy misconfigured", http.StatusInternalServerError)
+		})
+	}
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.Transport = &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+	}
+	return http.StripPrefix("/admin/acme-proxy", proxy)
 }
 
 func (h *Handler) handleDashboard(w http.ResponseWriter, r *http.Request) {

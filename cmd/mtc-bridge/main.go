@@ -179,7 +179,11 @@ func main() {
 
 	// Create HTTP handlers.
 	tlogHandler := tlogtiles.New(stateStore, revMgr, cfg.Log.Origin, logger.With("component", "tlogtiles"))
-	adminHandler, err := admin.New(stateStore, w, issuer, cfg.Log.Origin, caNameMap, logger.With("component", "admin"))
+	acmeExtURL := ""
+	if cfg.ACME.Enabled {
+		acmeExtURL = cfg.ACME.ExternalURL
+	}
+	adminHandler, err := admin.New(stateStore, w, issuer, cfg.Log.Origin, caNameMap, acmeExtURL, logger.With("component", "admin"))
 	if err != nil {
 		logger.Error("failed to create admin handler", "error", err)
 		os.Exit(1)

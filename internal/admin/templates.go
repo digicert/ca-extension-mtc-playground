@@ -26,6 +26,7 @@ const dashboardHTML = `<!DOCTYPE html>
 				<a href="/admin" class="font-semibold underline">Dashboard</a>
 				<a href="/admin/certs" class="opacity-75 hover:opacity-100">Certificates</a>
 				<a href="/admin/viz" class="opacity-75 hover:opacity-100">Visualization</a>
+				<a href="/admin/acme-demo" class="opacity-75 hover:opacity-100">ACME Demo</a>
 			</div>
 		</div>
 	</nav>
@@ -210,6 +211,7 @@ const certBrowserHTML = `<!DOCTYPE html>
 				<a href="/admin" class="opacity-75 hover:opacity-100">Dashboard</a>
 				<a href="/admin/certs" class="font-semibold underline">Certificates</a>
 				<a href="/admin/viz" class="opacity-75 hover:opacity-100">Visualization</a>
+				<a href="/admin/acme-demo" class="opacity-75 hover:opacity-100">ACME Demo</a>
 			</div>
 		</div>
 	</nav>
@@ -295,6 +297,7 @@ const certDetailStartHTML = `<!DOCTYPE html>
 				<a href="/admin" class="opacity-75 hover:opacity-100">Dashboard</a>
 				<a href="/admin/certs" class="opacity-75 hover:opacity-100">Certificates</a>
 				<a href="/admin/viz" class="opacity-75 hover:opacity-100">Visualization</a>
+				<a href="/admin/acme-demo" class="opacity-75 hover:opacity-100">ACME Demo</a>
 			</div>
 		</div>
 	</nav>
@@ -379,6 +382,7 @@ const vizExplorerHTML = `<!DOCTYPE html>
 				<a href="/admin" class="opacity-75 hover:opacity-100">Dashboard</a>
 				<a href="/admin/certs" class="opacity-75 hover:opacity-100">Certificates</a>
 				<a href="/admin/viz" class="font-semibold underline">Visualization</a>
+				<a href="/admin/acme-demo" class="opacity-75 hover:opacity-100">ACME Demo</a>
 			</div>
 		</div>
 	</nav>
@@ -1995,5 +1999,1124 @@ const vizExplorerHTML = `<!DOCTYPE html>
 		}
 	})();
 	</script>
+</body>
+</html>`
+
+const acmeDemoHTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>MTC Bridge — ACME Demo</title>
+	<script src="https://cdn.tailwindcss.com"></script>
+	<style>
+		#steps.compact { gap: 0 !important; }
+		#steps.compact .step-card { margin-bottom: 0; border-radius: 0; box-shadow: none; border-bottom: 1px solid #e5e7eb; }
+		#steps.compact .step-card:first-child { border-top-left-radius: 0.5rem; border-top-right-radius: 0.5rem; }
+		#steps.compact .step-card:last-child { border-bottom-left-radius: 0.5rem; border-bottom-right-radius: 0.5rem; border-bottom: none; }
+		#steps.compact .step-header { padding: 4px 12px; }
+		#steps.compact .step-detail { display: none !important; }
+		#steps.compact .step-title { font-size: 0.75rem; }
+		#steps.compact .step-chevron { display: none; }
+		#steps.compact .step-icon { width: 1.25rem; height: 1.25rem; }
+		#steps.compact .step-icon svg { width: 0.75rem; height: 0.75rem; }
+	</style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+	<nav class="bg-indigo-700 text-white px-6 py-4 shadow">
+		<div class="flex items-center justify-between max-w-7xl mx-auto">
+			<h1 class="text-xl font-bold">MTC Bridge Dashboard</h1>
+			<div class="flex gap-4 text-sm">
+				<a href="/admin" class="opacity-75 hover:opacity-100">Dashboard</a>
+				<a href="/admin/certs" class="opacity-75 hover:opacity-100">Certificates</a>
+				<a href="/admin/viz" class="opacity-75 hover:opacity-100">Visualization</a>
+				<a href="/admin/acme-demo" class="font-semibold underline">ACME Demo</a>
+			</div>
+		</div>
+	</nav>
+
+	<main class="max-w-4xl mx-auto px-6 py-8">
+		<div class="flex items-center justify-between mb-6">
+			<div>
+				<h2 class="text-2xl font-bold text-gray-900">ACME Enrollment Demo</h2>
+				<p class="text-gray-500 text-sm mt-1">
+					Interactive RFC 8555 certificate enrollment with MTC Merkle proofs — runs entirely in your browser
+				</p>
+			</div>
+			<button id="run-btn" onclick="runDemo()"
+				class="px-6 py-3 bg-indigo-600 text-white rounded-lg font-semibold hover:bg-indigo-700 transition disabled:opacity-50 disabled:cursor-not-allowed">
+				Run Demo
+			</button>
+		</div>
+
+		<div class="mb-6 flex items-center gap-4">
+			<label class="text-sm font-medium text-gray-700">Domain:</label>
+			<input type="text" id="demo-domain" value="acme-demo.example.com"
+				class="px-4 py-2 border border-gray-300 rounded-lg text-sm w-80 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+				placeholder="Domain name for certificate">
+		</div>
+
+		<div id="steps-toolbar" class="flex items-center justify-end gap-2 mb-3 hidden">
+			<button onclick="expandAll()" class="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition">Expand All</button>
+			<button onclick="collapseAll()" class="px-3 py-1.5 text-xs font-medium text-gray-600 bg-white border border-gray-300 rounded-md hover:bg-gray-50 transition">Collapse All</button>
+			<button onclick="toggleCompact()" id="compact-btn" class="px-3 py-1.5 text-xs font-medium text-indigo-600 bg-indigo-50 border border-indigo-200 rounded-md hover:bg-indigo-100 transition">Compact View</button>
+		</div>
+		<div id="steps" class="space-y-3"></div>
+
+		<!-- Results section (hidden until complete) -->
+		<div id="results" class="hidden mt-8">
+			<div class="border-b border-gray-200 mb-4">
+				<nav class="flex gap-4">
+					<button onclick="showResultTab('cert')" id="tab-cert" class="px-4 py-2 text-sm font-medium border-b-2 border-indigo-600 text-indigo-600">Certificate</button>
+					<button onclick="showResultTab('inclusion')" id="tab-inclusion" class="px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700">Inclusion Proof</button>
+					<button onclick="showResultTab('consistency')" id="tab-consistency" class="px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700">Consistency Proof</button>
+				</nav>
+			</div>
+			<div id="result-cert" class="bg-white rounded-lg shadow p-6"></div>
+			<div id="result-inclusion" class="bg-white rounded-lg shadow p-6 hidden"></div>
+			<div id="result-consistency" class="bg-white rounded-lg shadow p-6 hidden"></div>
+		</div>
+	</main>
+
+<script>
+// ============================================================
+// Configuration
+// ============================================================
+const ACME_EXTERNAL_URL = '{{ .ACMEExternalURL }}';
+const PROXY_BASE = '/admin/acme-proxy';
+
+// ============================================================
+// Step definitions
+// ============================================================
+const STEPS = [
+	{ id: 'keygen',      title: '1. Generate Account Key Pair (ECDSA P-256)' },
+	{ id: 'directory',   title: '2. Fetch ACME Directory' },
+	{ id: 'nonce',       title: '3. Get Initial Nonce' },
+	{ id: 'account',     title: '4. Create Account' },
+	{ id: 'order',       title: '5. Create Order' },
+	{ id: 'authz',       title: '6. Fetch Authorization' },
+	{ id: 'challenge',   title: '7. Respond to Challenge' },
+	{ id: 'poll-ready',  title: '8. Poll Order → Ready' },
+	{ id: 'certkey',     title: '9. Generate Certificate Key Pair' },
+	{ id: 'csr',         title: '10. Build CSR (PKCS#10)' },
+	{ id: 'finalize',    title: '11. Finalize Order' },
+	{ id: 'download',    title: '12. Download Certificate' },
+	{ id: 'inclusion',   title: '13. Fetch Inclusion Proof' },
+	{ id: 'consistency', title: '14. Fetch Consistency Proof' },
+	{ id: 'verify',      title: '15. Verify Proofs' },
+];
+
+function renderSteps() {
+	const container = document.getElementById('steps');
+	container.innerHTML = STEPS.map(s => ` +
+		"`" + `
+		<div class="step-card bg-white rounded-lg shadow overflow-hidden" id="step-${s.id}">
+			<div class="step-header flex items-center justify-between px-5 py-3 cursor-pointer select-none" onclick="toggleStep('${s.id}')">
+				<div class="flex items-center gap-3">
+					<span id="icon-${s.id}" class="step-icon w-6 h-6 rounded-full bg-gray-200 flex items-center justify-center text-xs text-gray-400">-</span>
+					<span class="step-title font-medium text-sm text-gray-800">${s.title}</span>
+				</div>
+				<div class="flex items-center gap-2">
+					<span id="timing-${s.id}" class="text-xs text-gray-400"></span>
+					<svg id="chevron-${s.id}" class="step-chevron w-4 h-4 text-gray-400 transition-transform duration-200" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
+				</div>
+			</div>
+			<div class="step-detail hidden border-t px-5 py-4 bg-gray-50" id="detail-${s.id}">
+				<div class="grid md:grid-cols-2 gap-4">
+					<div>
+						<h4 class="text-xs font-semibold text-gray-500 mb-2 uppercase">Request</h4>
+						<pre id="req-${s.id}" class="text-xs bg-gray-900 text-green-400 p-3 rounded overflow-x-auto max-h-64 whitespace-pre-wrap"></pre>
+					</div>
+					<div>
+						<h4 class="text-xs font-semibold text-gray-500 mb-2 uppercase">Response</h4>
+						<pre id="res-${s.id}" class="text-xs bg-gray-900 text-blue-400 p-3 rounded overflow-x-auto max-h-64 whitespace-pre-wrap"></pre>
+					</div>
+				</div>
+			</div>
+		</div>
+	` + "`" + `).join('');
+	document.getElementById('steps-toolbar').classList.remove('hidden');
+}
+
+function toggleStep(id) {
+	const el = document.getElementById('detail-' + id);
+	const chevron = document.getElementById('chevron-' + id);
+	el.classList.toggle('hidden');
+	chevron.classList.toggle('rotate-90');
+}
+
+function expandAll() {
+	STEPS.forEach(s => {
+		document.getElementById('detail-' + s.id).classList.remove('hidden');
+		document.getElementById('chevron-' + s.id).classList.add('rotate-90');
+	});
+}
+
+function collapseAll() {
+	STEPS.forEach(s => {
+		document.getElementById('detail-' + s.id).classList.add('hidden');
+		document.getElementById('chevron-' + s.id).classList.remove('rotate-90');
+	});
+}
+
+function toggleCompact() {
+	const steps = document.getElementById('steps');
+	const btn = document.getElementById('compact-btn');
+	steps.classList.toggle('compact');
+	const isCompact = steps.classList.contains('compact');
+	btn.textContent = isCompact ? 'Expanded View' : 'Compact View';
+}
+
+function setStepStatus(id, status) {
+	const icon = document.getElementById('icon-' + id);
+	if (status === 'running') {
+		icon.className = 'step-icon w-6 h-6 rounded-full bg-indigo-100 flex items-center justify-center';
+		icon.innerHTML = '<svg class="w-4 h-4 text-indigo-600 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v4a4 4 0 00-4 4H4z"></path></svg>';
+	} else if (status === 'success') {
+		icon.className = 'step-icon w-6 h-6 rounded-full bg-green-100 flex items-center justify-center';
+		icon.innerHTML = '<svg class="w-4 h-4 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>';
+	} else if (status === 'error') {
+		icon.className = 'step-icon w-6 h-6 rounded-full bg-red-100 flex items-center justify-center';
+		icon.innerHTML = '<svg class="w-4 h-4 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/></svg>';
+	}
+}
+
+function setStepDetail(id, req, res) {
+	if (req !== null) document.getElementById('req-' + id).textContent = typeof req === 'string' ? req : JSON.stringify(req, null, 2);
+	if (res !== null) document.getElementById('res-' + id).textContent = typeof res === 'string' ? res : JSON.stringify(res, null, 2);
+}
+
+function setStepTiming(id, ms) {
+	document.getElementById('timing-' + id).textContent = ms + ' ms';
+}
+
+// ============================================================
+// Base64url utilities
+// ============================================================
+function base64url(bytes) {
+	const bin = Array.from(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes))
+		.map(b => String.fromCharCode(b)).join('');
+	return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+function base64urlEncode(str) {
+	return base64url(new TextEncoder().encode(str));
+}
+
+function base64urlDecode(str) {
+	str = str.replace(/-/g, '+').replace(/_/g, '/');
+	while (str.length % 4) str += '=';
+	const bin = atob(str);
+	const bytes = new Uint8Array(bin.length);
+	for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+	return bytes;
+}
+
+function hexEncode(bytes) {
+	return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function hexDecode(hex) {
+	const bytes = new Uint8Array(hex.length / 2);
+	for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+	return bytes;
+}
+
+// ============================================================
+// Crypto utilities (Web Crypto API)
+// ============================================================
+async function generateKeyPair() {
+	return crypto.subtle.generateKey(
+		{ name: 'ECDSA', namedCurve: 'P-256' },
+		true,
+		['sign']
+	);
+}
+
+async function exportJWK(keyPair) {
+	const jwk = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
+	return { crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y };
+}
+
+async function jwkThumbprint(jwk) {
+	const canonical = JSON.stringify({ crv: jwk.crv, kty: jwk.kty, x: jwk.x, y: jwk.y });
+	const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonical));
+	return base64url(new Uint8Array(hash));
+}
+
+async function ecSign(privateKey, data) {
+	const sig = await crypto.subtle.sign(
+		{ name: 'ECDSA', hash: 'SHA-256' },
+		privateKey,
+		new TextEncoder().encode(data)
+	);
+	return new Uint8Array(sig);
+}
+
+// Convert DER ECDSA signature to raw r||s (64 bytes for P-256)
+function derToRaw(der) {
+	let offset = 2; // skip SEQUENCE tag + length
+	if (der[1] & 0x80) offset += (der[1] & 0x7f); // long-form length
+	// Parse r
+	if (der[offset] !== 0x02) throw new Error('Expected INTEGER tag for r');
+	const rLen = der[offset + 1];
+	const rBytes = der.slice(offset + 2, offset + 2 + rLen);
+	offset += 2 + rLen;
+	// Parse s
+	if (der[offset] !== 0x02) throw new Error('Expected INTEGER tag for s');
+	const sLen = der[offset + 1];
+	const sBytes = der.slice(offset + 2, offset + 2 + sLen);
+	// Pad/trim to 32 bytes each
+	const raw = new Uint8Array(64);
+	const rTrim = rBytes.length > 32 ? rBytes.slice(rBytes.length - 32) : rBytes;
+	const sTrim = sBytes.length > 32 ? sBytes.slice(sBytes.length - 32) : sBytes;
+	raw.set(rTrim, 32 - rTrim.length);
+	raw.set(sTrim, 64 - sTrim.length);
+	return raw;
+}
+
+// ============================================================
+// JWS builder
+// ============================================================
+async function buildJWS(acmeURL, nonce, payload, keyPair, jwk, kid) {
+	const header = { alg: 'ES256', nonce: nonce, url: acmeURL };
+	if (jwk) header.jwk = jwk;
+	if (kid) header.kid = kid;
+	const protectedB64 = base64urlEncode(JSON.stringify(header));
+	const payloadB64 = payload === '' ? '' : base64urlEncode(JSON.stringify(payload));
+	const sigInput = protectedB64 + '.' + payloadB64;
+	const sig = await ecSign(keyPair.privateKey, sigInput);
+	return { protected: protectedB64, payload: payloadB64, signature: base64url(sig) };
+}
+
+// ============================================================
+// ACME HTTP client (through proxy)
+// ============================================================
+let currentNonce = '';
+
+async function acmePost(proxyPath, jws) {
+	const resp = await fetch(PROXY_BASE + proxyPath, {
+		method: 'POST',
+		headers: { 'Content-Type': 'application/jose+json' },
+		body: JSON.stringify(jws),
+	});
+	const nonce = resp.headers.get('Replay-Nonce');
+	if (nonce) currentNonce = nonce;
+	const ct = resp.headers.get('Content-Type') || '';
+	let body;
+	if (ct.includes('application/json') || ct.includes('application/problem+json')) {
+		body = await resp.json();
+	} else {
+		body = await resp.text();
+	}
+	return { status: resp.status, body, location: resp.headers.get('Location'), nonce };
+}
+
+function extractProxyPath(fullURL) {
+	return fullURL.replace(ACME_EXTERNAL_URL, '');
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ============================================================
+// ASN.1 DER helpers for CSR builder
+// ============================================================
+function asn1Length(len) {
+	if (len < 0x80) return new Uint8Array([len]);
+	if (len < 0x100) return new Uint8Array([0x81, len]);
+	return new Uint8Array([0x82, (len >> 8) & 0xff, len & 0xff]);
+}
+
+function asn1Wrap(tag, ...items) {
+	let total = 0;
+	for (const it of items) total += it.length;
+	const lenBytes = asn1Length(total);
+	const out = new Uint8Array(1 + lenBytes.length + total);
+	out[0] = tag;
+	out.set(lenBytes, 1);
+	let off = 1 + lenBytes.length;
+	for (const it of items) { out.set(it, off); off += it.length; }
+	return out;
+}
+
+function asn1Sequence(...items) { return asn1Wrap(0x30, ...items); }
+function asn1Set(...items) { return asn1Wrap(0x31, ...items); }
+function asn1ContextConstructed(tagNum, ...items) { return asn1Wrap(0xa0 | tagNum, ...items); }
+
+function asn1OID(encoded) { return asn1Wrap(0x06, new Uint8Array(encoded)); }
+function asn1BitString(bytes) {
+	const out = new Uint8Array(bytes.length + 1);
+	out[0] = 0x00; // no unused bits
+	out.set(bytes, 1);
+	return asn1Wrap(0x03, out);
+}
+function asn1OctetString(bytes) { return asn1Wrap(0x04, bytes); }
+function asn1Integer(val) {
+	if (typeof val === 'number') {
+		if (val === 0) return new Uint8Array([0x02, 0x01, 0x00]);
+		const bytes = [];
+		let v = val;
+		while (v > 0) { bytes.unshift(v & 0xff); v >>= 8; }
+		if (bytes[0] & 0x80) bytes.unshift(0);
+		return asn1Wrap(0x02, new Uint8Array(bytes));
+	}
+	return asn1Wrap(0x02, val);
+}
+
+// Common OIDs (pre-encoded)
+const OID_EC_PUBLIC_KEY = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01]; // 1.2.840.10045.2.1
+const OID_PRIME256V1   = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07]; // 1.2.840.10045.3.1.7
+const OID_ECDSA_SHA256 = [0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02]; // 1.2.840.10045.4.3.2
+const OID_SAN          = [0x55, 0x1d, 0x11]; // 2.5.29.17
+const OID_EXT_REQUEST  = [0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x09, 0x0e]; // 1.2.840.113549.1.9.14
+
+async function buildCSR(certKeyPair, domain) {
+	// 1. Export public key as raw uncompressed point (65 bytes: 0x04 || x || y)
+	const rawPub = new Uint8Array(await crypto.subtle.exportKey('raw', certKeyPair.publicKey));
+
+	// 2. Build SubjectPublicKeyInfo
+	const algId = asn1Sequence(asn1OID(OID_EC_PUBLIC_KEY), asn1OID(OID_PRIME256V1));
+	const spki = asn1Sequence(algId, asn1BitString(rawPub));
+
+	// 3. Build SAN extension: SEQUENCE { CONTEXT[2] IA5String(domain) }
+	const domainBytes = new TextEncoder().encode(domain);
+	const dnsName = asn1Wrap(0x82, domainBytes); // context [2] implicit IA5String
+	const sanValue = asn1Sequence(dnsName);
+	const sanExt = asn1Sequence(asn1OID(OID_SAN), asn1OctetString(sanValue));
+	const extensions = asn1Sequence(sanExt);
+
+	// 4. Build extensionRequest attribute
+	const extReqAttr = asn1Sequence(
+		asn1OID(OID_EXT_REQUEST),
+		asn1Set(extensions)
+	);
+	const attributes = asn1ContextConstructed(0, extReqAttr);
+
+	// 5. Build TBSCertificationRequest
+	const emptySubject = asn1Sequence(); // empty subject DN
+	const tbs = asn1Sequence(
+		asn1Integer(0), // version 0
+		emptySubject,
+		spki,
+		attributes
+	);
+
+	// 6. Sign TBS
+	const tbsSig = await crypto.subtle.sign(
+		{ name: 'ECDSA', hash: 'SHA-256' },
+		certKeyPair.privateKey,
+		tbs
+	);
+	const rawSig = new Uint8Array(tbsSig);
+
+	// Need to re-encode rawSig as DER for the CSR signature
+	function asn1IntegerFromBytes(b) {
+		let start = 0;
+		while (start < b.length - 1 && b[start] === 0) start++;
+		let val = b.slice(start);
+		if (val[0] & 0x80) { const padded = new Uint8Array(val.length + 1); padded.set(val, 1); val = padded; }
+		return asn1Wrap(0x02, val);
+	}
+	const sigDER = asn1Sequence(
+		asn1IntegerFromBytes(rawSig.slice(0, 32)),
+		asn1IntegerFromBytes(rawSig.slice(32))
+	);
+
+	// 7. Build CertificationRequest
+	const sigAlg = asn1Sequence(asn1OID(OID_ECDSA_SHA256));
+	return asn1Sequence(tbs, sigAlg, asn1BitString(sigDER));
+}
+
+// ============================================================
+// Result display helpers
+// ============================================================
+function showResultTab(tab) {
+	['cert', 'inclusion', 'consistency'].forEach(t => {
+		document.getElementById('result-' + t).classList.toggle('hidden', t !== tab);
+		const btn = document.getElementById('tab-' + t);
+		if (t === tab) {
+			btn.className = 'px-4 py-2 text-sm font-medium border-b-2 border-indigo-600 text-indigo-600';
+		} else {
+			btn.className = 'px-4 py-2 text-sm font-medium border-b-2 border-transparent text-gray-500 hover:text-gray-700';
+		}
+	});
+}
+
+function renderCertResult(pemText) {
+	const el = document.getElementById('result-cert');
+	// Try to parse certificate fields from PEM
+	let certHTML = '';
+	try {
+		const b64 = pemText.split('-----BEGIN CERTIFICATE-----')[1].split('-----END CERTIFICATE-----')[0].trim();
+		const der = base64Decode(b64);
+		const fields = parseCertDER(der);
+		certHTML = renderCertFields(fields);
+	} catch (e) {
+		certHTML = '<p class="text-sm text-gray-500 mb-4">Could not parse certificate fields: ' + e.message + '</p>';
+	}
+	certHTML += '<h4 class="text-sm font-semibold text-gray-600 mt-6 mb-2">Raw PEM</h4>';
+	certHTML += '<pre class="text-xs bg-gray-900 text-green-400 p-4 rounded overflow-x-auto max-h-96 whitespace-pre-wrap">' + escapeHTML(pemText) + '</pre>';
+	el.innerHTML = certHTML;
+}
+
+function base64Decode(b64) {
+	const bin = atob(b64.replace(/\s/g, ''));
+	const bytes = new Uint8Array(bin.length);
+	for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+	return bytes;
+}
+
+function escapeHTML(s) {
+	return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ============================================================
+// Minimal X.509 DER parser (no external libraries)
+// ============================================================
+function parseCertDER(der) {
+	const fields = {};
+	try {
+		// Parse outer SEQUENCE
+		const cert = readASN1(der, 0);
+		const tbs = readASN1(der, cert.contentStart);
+
+		let pos = tbs.contentStart;
+		// Version (context [0] explicit)
+		if (der[pos] === 0xa0) {
+			const ver = readASN1(der, pos);
+			const verInt = readASN1(der, ver.contentStart);
+			fields.version = der[verInt.contentStart] + 1;
+			pos = ver.end;
+		}
+		// Serial number
+		const serial = readASN1(der, pos);
+		let serialBytes = der.slice(serial.contentStart, serial.end);
+		while (serialBytes.length > 1 && serialBytes[0] === 0) serialBytes = serialBytes.slice(1);
+		fields.serialNumber = hexEncode(serialBytes);
+		pos = serial.end;
+
+		// Signature algorithm
+		const sigAlg = readASN1(der, pos);
+		fields.signatureAlgorithm = readOIDString(der, sigAlg.contentStart);
+		pos = sigAlg.end;
+
+		// Issuer
+		const issuer = readASN1(der, pos);
+		fields.issuer = readDN(der, issuer.contentStart, issuer.end);
+		pos = issuer.end;
+
+		// Validity
+		const validity = readASN1(der, pos);
+		let vPos = validity.contentStart;
+		const notBefore = readASN1(der, vPos);
+		fields.notBefore = readTimeString(der, notBefore);
+		vPos = notBefore.end;
+		const notAfter = readASN1(der, vPos);
+		fields.notAfter = readTimeString(der, notAfter);
+		pos = validity.end;
+
+		// Subject
+		const subject = readASN1(der, pos);
+		fields.subject = readDN(der, subject.contentStart, subject.end);
+		pos = subject.end;
+
+		// SubjectPublicKeyInfo
+		const spki = readASN1(der, pos);
+		const spkiAlg = readASN1(der, spki.contentStart);
+		fields.publicKeyAlgorithm = readOIDString(der, spkiAlg.contentStart);
+		if (der[spkiAlg.contentStart + readASN1(der, spkiAlg.contentStart).end - spkiAlg.contentStart] === 0x06) {
+			// curve OID
+			const curveOid = readASN1(der, readASN1(der, spkiAlg.contentStart).end);
+			fields.publicKeyCurve = oidToName(readOIDBytes(der, curveOid.contentStart, curveOid.end));
+		}
+		pos = spki.end;
+
+		// Extensions (context [3])
+		while (pos < tbs.end) {
+			const tag = der[pos];
+			if (tag === 0xa3) {
+				const extWrapper = readASN1(der, pos);
+				const extsSeq = readASN1(der, extWrapper.contentStart);
+				fields.extensions = readExtensions(der, extsSeq.contentStart, extsSeq.end);
+			}
+			const skip = readASN1(der, pos);
+			pos = skip.end;
+		}
+
+		// Signature algorithm (outer)
+		const outerSigAlg = readASN1(der, tbs.end);
+		fields.outerSignatureAlgorithm = readOIDString(der, outerSigAlg.contentStart);
+
+	} catch (e) {
+		fields._parseError = e.message;
+	}
+	return fields;
+}
+
+function readASN1(der, offset) {
+	const tag = der[offset];
+	let len, hdrLen;
+	if (der[offset + 1] < 0x80) {
+		len = der[offset + 1]; hdrLen = 2;
+	} else {
+		const numBytes = der[offset + 1] & 0x7f;
+		len = 0;
+		for (let i = 0; i < numBytes; i++) len = (len << 8) | der[offset + 2 + i];
+		hdrLen = 2 + numBytes;
+	}
+	return { tag, contentStart: offset + hdrLen, end: offset + hdrLen + len, length: len };
+}
+
+function readOIDBytes(der, start, end) {
+	return Array.from(der.slice(start, end));
+}
+
+function readOIDString(der, pos) {
+	const oid = readASN1(der, pos);
+	if (oid.tag !== 0x06) return 'unknown';
+	const bytes = der.slice(oid.contentStart, oid.end);
+	const parts = [];
+	parts.push(Math.floor(bytes[0] / 40));
+	parts.push(bytes[0] % 40);
+	let val = 0;
+	for (let i = 1; i < bytes.length; i++) {
+		val = (val << 7) | (bytes[i] & 0x7f);
+		if (!(bytes[i] & 0x80)) { parts.push(val); val = 0; }
+	}
+	const oidStr = parts.join('.');
+	return oidToName(oidStr) || oidStr;
+}
+
+function oidToName(oid) {
+	const oidStr = Array.isArray(oid) ? oid.join('.') : oid;
+	const names = {
+		'1.2.840.10045.2.1': 'EC Public Key',
+		'1.2.840.10045.3.1.7': 'P-256',
+		'1.2.840.10045.4.3.2': 'ECDSA-SHA256',
+		'1.2.840.113549.1.1.1': 'RSA',
+		'1.2.840.113549.1.1.11': 'SHA256-RSA',
+		'1.3.6.1.4.1.44363.47.0': 'id-alg-mtcProof (MTC)',
+		'2.5.29.17': 'Subject Alternative Name',
+		'2.5.29.15': 'Key Usage',
+		'2.5.29.19': 'Basic Constraints',
+		'2.5.29.14': 'Subject Key Identifier',
+		'2.5.29.35': 'Authority Key Identifier',
+	};
+	return names[oidStr] || oidStr;
+}
+
+function readDN(der, start, end) {
+	const parts = [];
+	let pos = start;
+	while (pos < end) {
+		const set = readASN1(der, pos);
+		if (set.tag !== 0x31) { pos = set.end; continue; }
+		const seq = readASN1(der, set.contentStart);
+		const oidNode = readASN1(der, seq.contentStart);
+		const valNode = readASN1(der, oidNode.end);
+		const oid = readOIDString(der, seq.contentStart);
+		const val = new TextDecoder().decode(der.slice(valNode.contentStart, valNode.end));
+		const shortNames = {
+			'2.5.4.3': 'CN', '2.5.4.6': 'C', '2.5.4.7': 'L', '2.5.4.8': 'ST',
+			'2.5.4.10': 'O', '2.5.4.11': 'OU',
+		};
+		// Re-read OID as raw string for lookup
+		const rawOid = readASN1(der, seq.contentStart);
+		const oidBytes = der.slice(rawOid.contentStart, rawOid.end);
+		const oidParts = [];
+		oidParts.push(Math.floor(oidBytes[0] / 40));
+		oidParts.push(oidBytes[0] % 40);
+		let v = 0;
+		for (let i = 1; i < oidBytes.length; i++) {
+			v = (v << 7) | (oidBytes[i] & 0x7f);
+			if (!(oidBytes[i] & 0x80)) { oidParts.push(v); v = 0; }
+		}
+		const label = shortNames[oidParts.join('.')] || oidParts.join('.');
+		parts.push({ label, value: val });
+		pos = set.end;
+	}
+	return parts;
+}
+
+function readTimeString(der, node) {
+	const bytes = der.slice(node.contentStart, node.end);
+	const str = new TextDecoder().decode(bytes);
+	if (node.tag === 0x17) { // UTCTime
+		const y = parseInt(str.substr(0, 2));
+		return (y >= 50 ? '19' : '20') + str.substr(0, 2) + '-' + str.substr(2, 2) + '-' + str.substr(4, 2) + ' ' + str.substr(6, 2) + ':' + str.substr(8, 2) + ':' + str.substr(10, 2) + ' UTC';
+	}
+	// GeneralizedTime
+	return str.substr(0, 4) + '-' + str.substr(4, 2) + '-' + str.substr(6, 2) + ' ' + str.substr(8, 2) + ':' + str.substr(10, 2) + ':' + str.substr(12, 2) + ' UTC';
+}
+
+function readExtensions(der, start, end) {
+	const exts = [];
+	let pos = start;
+	while (pos < end) {
+		const extSeq = readASN1(der, pos);
+		if (extSeq.tag !== 0x30) { pos = extSeq.end; continue; }
+		const oidNode = readASN1(der, extSeq.contentStart);
+		const oidBytes = der.slice(oidNode.contentStart, oidNode.end);
+		const oidParts = [];
+		oidParts.push(Math.floor(oidBytes[0] / 40));
+		oidParts.push(oidBytes[0] % 40);
+		let v = 0;
+		for (let i = 1; i < oidBytes.length; i++) {
+			v = (v << 7) | (oidBytes[i] & 0x7f);
+			if (!(oidBytes[i] & 0x80)) { oidParts.push(v); v = 0; }
+		}
+		const oidStr = oidParts.join('.');
+		const name = oidToName(oidStr);
+
+		let critical = false;
+		let valueStart = oidNode.end;
+		const next = readASN1(der, valueStart);
+		if (next.tag === 0x01) { // BOOLEAN (critical)
+			critical = der[next.contentStart] !== 0;
+			valueStart = next.end;
+		}
+
+		let detail = '';
+		// Try to parse SAN
+		if (oidStr === '2.5.29.17') {
+			try {
+				const octet = readASN1(der, valueStart);
+				const sanSeq = readASN1(der, octet.contentStart);
+				let sp = sanSeq.contentStart;
+				const names = [];
+				while (sp < sanSeq.end) {
+					const entry = readASN1(der, sp);
+					if ((entry.tag & 0x1f) === 2) { // dNSName
+						names.push(new TextDecoder().decode(der.slice(entry.contentStart, entry.end)));
+					}
+					sp = entry.end;
+				}
+				detail = names.join(', ');
+			} catch (e) { detail = '(parse error)'; }
+		}
+
+		exts.push({ oid: oidStr, name, critical, detail });
+		pos = extSeq.end;
+	}
+	return exts;
+}
+
+function renderCertFields(f) {
+	let html = '<div class="space-y-4">';
+
+	// Signature algorithm (highlight MTC)
+	const sigName = f.outerSignatureAlgorithm || f.signatureAlgorithm || 'Unknown';
+	const isMTC = sigName.includes('mtcProof') || sigName.includes('MTC');
+	if (isMTC) {
+		html += '<div class="bg-purple-50 border border-purple-200 rounded-lg p-4"><p class="text-sm font-semibold text-purple-800">Signature Algorithm: ' + escapeHTML(sigName) + '</p><p class="text-xs text-purple-600 mt-1">This is an MTC-spec certificate — the signature value carries a Merkle inclusion proof, not a traditional cryptographic signature.</p></div>';
+	}
+
+	// Subject
+	if (f.subject && f.subject.length > 0) {
+		html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Subject</h4><div class="bg-gray-50 rounded p-3 text-sm">';
+		f.subject.forEach(p => { html += '<div><span class="text-gray-500 mr-2">' + escapeHTML(p.label) + ':</span><span class="font-mono">' + escapeHTML(p.value) + '</span></div>'; });
+		html += '</div></div>';
+	}
+
+	// Issuer
+	if (f.issuer && f.issuer.length > 0) {
+		html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Issuer</h4><div class="bg-gray-50 rounded p-3 text-sm">';
+		f.issuer.forEach(p => { html += '<div><span class="text-gray-500 mr-2">' + escapeHTML(p.label) + ':</span><span class="font-mono">' + escapeHTML(p.value) + '</span></div>'; });
+		html += '</div></div>';
+	}
+
+	// Grid: Version, Serial, Validity, Key
+	html += '<div class="grid md:grid-cols-2 gap-4">';
+	if (f.version) html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Version</h4><p class="text-sm font-mono">v' + f.version + '</p></div>';
+	if (f.serialNumber) html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Serial Number</h4><p class="text-sm font-mono break-all">' + escapeHTML(f.serialNumber) + '</p></div>';
+	if (f.notBefore) html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Not Before</h4><p class="text-sm">' + escapeHTML(f.notBefore) + '</p></div>';
+	if (f.notAfter) html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Not After</h4><p class="text-sm">' + escapeHTML(f.notAfter) + '</p></div>';
+	if (f.publicKeyAlgorithm) html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Public Key</h4><p class="text-sm">' + escapeHTML(f.publicKeyAlgorithm) + (f.publicKeyCurve ? ' (' + escapeHTML(f.publicKeyCurve) + ')' : '') + '</p></div>';
+	if (!isMTC && f.signatureAlgorithm) html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Signature Algorithm</h4><p class="text-sm">' + escapeHTML(f.signatureAlgorithm) + '</p></div>';
+	html += '</div>';
+
+	// Extensions
+	if (f.extensions && f.extensions.length > 0) {
+		html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Extensions</h4><div class="space-y-1">';
+		f.extensions.forEach(ext => {
+			html += '<div class="bg-gray-50 rounded px-3 py-2 text-sm flex items-center gap-2">';
+			html += '<span class="font-medium">' + escapeHTML(ext.name) + '</span>';
+			if (ext.critical) html += '<span class="text-xs bg-red-100 text-red-700 px-1.5 rounded">critical</span>';
+			if (ext.detail) html += '<span class="text-gray-500 ml-2">' + escapeHTML(ext.detail) + '</span>';
+			html += '</div>';
+		});
+		html += '</div></div>';
+	}
+
+	html += '</div>';
+	return html;
+}
+
+function renderInclusionProof(data) {
+	const el = document.getElementById('result-inclusion');
+	let html = '<div class="space-y-4">';
+	html += '<div class="grid md:grid-cols-2 gap-4">';
+	html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Leaf Index</h4><p class="text-lg font-mono font-bold">' + data.leaf_index + '</p></div>';
+	html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Tree Size</h4><p class="text-lg font-mono font-bold">' + data.tree_size + '</p></div>';
+	html += '</div>';
+	html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Leaf Hash</h4><p class="text-xs font-mono break-all bg-gray-50 rounded p-2">' + escapeHTML(data.leaf_hash) + '</p></div>';
+	html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Root Hash</h4><p class="text-xs font-mono break-all bg-gray-50 rounded p-2">' + escapeHTML(data.root_hash) + '</p></div>';
+
+	// Proof path
+	html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Proof Path (' + data.proof.length + ' hashes)</h4><div class="space-y-1">';
+	data.proof.forEach((h, i) => {
+		html += '<div class="flex items-center gap-2 text-xs"><span class="bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded font-medium w-6 text-center">' + i + '</span><span class="font-mono break-all">' + escapeHTML(h) + '</span></div>';
+	});
+	html += '</div></div>';
+
+	// Verification badge
+	html += '<div id="inclusion-verify" class="mt-2"></div>';
+
+	// Checkpoint
+	html += '<details class="mt-4"><summary class="text-xs text-gray-500 cursor-pointer">Signed Checkpoint</summary><pre class="text-xs bg-gray-900 text-blue-400 p-3 rounded mt-2 whitespace-pre-wrap">' + escapeHTML(data.checkpoint) + '</pre></details>';
+
+	html += '</div>';
+	el.innerHTML = html;
+}
+
+function renderConsistencyProof(data) {
+	const el = document.getElementById('result-consistency');
+	let html = '<div class="space-y-4">';
+	html += '<div class="grid md:grid-cols-2 gap-4">';
+	html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Old Tree Size</h4><p class="text-lg font-mono font-bold">' + data.old_size + '</p></div>';
+	html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">New Tree Size</h4><p class="text-lg font-mono font-bold">' + data.new_size + '</p></div>';
+	html += '</div>';
+	html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Old Root</h4><p class="text-xs font-mono break-all bg-gray-50 rounded p-2">' + escapeHTML(data.old_root) + '</p></div>';
+	html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">New Root</h4><p class="text-xs font-mono break-all bg-gray-50 rounded p-2">' + escapeHTML(data.new_root) + '</p></div>';
+
+	html += '<div><h4 class="text-xs font-semibold text-gray-500 uppercase mb-1">Proof Hashes (' + data.proof.length + ')</h4><div class="space-y-1">';
+	data.proof.forEach((h, i) => {
+		html += '<div class="flex items-center gap-2 text-xs"><span class="bg-amber-100 text-amber-700 px-2 py-0.5 rounded font-medium w-6 text-center">' + i + '</span><span class="font-mono break-all">' + escapeHTML(h) + '</span></div>';
+	});
+	html += '</div></div>';
+
+	html += '<div id="consistency-verify" class="mt-2"></div>';
+	html += '</div>';
+	el.innerHTML = html;
+}
+
+// ============================================================
+// Client-side Merkle proof verification
+// ============================================================
+async function sha256(data) {
+	const hash = await crypto.subtle.digest('SHA-256', data);
+	return new Uint8Array(hash);
+}
+
+// RFC 9162 §2.1.3.2 inclusion proof verification using recursive decomposition.
+async function verifyInclusionProof(leafHash, index, treeSize, proofHashes, rootHash) {
+	const hash = hexDecode(leafHash);
+	const proof = proofHashes.map(h => hexDecode(h));
+	let proofIdx = 0;
+
+	async function rootFromProof(idx, start, end, h) {
+		const n = end - start;
+		if (n === 1) return h;
+		if (proofIdx >= proof.length) return h;
+		const k = splitPoint(n);
+		if (idx - start < k) {
+			const left = await rootFromProof(idx, start, start + k, h);
+			if (proofIdx < proof.length) {
+				const right = proof[proofIdx++];
+				return await interiorHash(left, right);
+			}
+			return left;
+		} else {
+			const right = await rootFromProof(idx, start + k, end, h);
+			if (proofIdx < proof.length) {
+				const left = proof[proofIdx++];
+				return await interiorHash(left, right);
+			}
+			return right;
+		}
+	}
+
+	function splitPoint(n) {
+		if (n < 2) return 0;
+		return 1 << (Math.floor(Math.log2(n - 1)));
+	}
+
+	async function interiorHash(left, right) {
+		const combined = new Uint8Array(1 + 32 + 32);
+		combined[0] = 0x01;
+		combined.set(left, 1);
+		combined.set(right, 33);
+		return await sha256(combined);
+	}
+
+	const computed = await rootFromProof(index, 0, treeSize, hash);
+	return hexEncode(computed) === rootHash;
+}
+
+// ============================================================
+// Main demo flow
+// ============================================================
+let accountKey, accountJWK, accountURL, certKey;
+let snapshotTreeSize = 0;
+
+async function runDemo() {
+	const btn = document.getElementById('run-btn');
+	btn.disabled = true;
+	btn.textContent = 'Running...';
+	document.getElementById('results').classList.add('hidden');
+	renderSteps();
+
+	const domain = document.getElementById('demo-domain').value.trim() || 'acme-demo.example.com';
+	let certPEM = '';
+	let certSerial = '';
+	let inclusionData = null;
+	let consistencyData = null;
+	let errorStep = '';
+
+	async function step(id, fn) {
+		setStepStatus(id, 'running');
+		const t0 = performance.now();
+		try {
+			await fn();
+			setStepTiming(id, Math.round(performance.now() - t0));
+			setStepStatus(id, 'success');
+		} catch (e) {
+			setStepTiming(id, Math.round(performance.now() - t0));
+			setStepStatus(id, 'error');
+			setStepDetail(id, null, 'Error: ' + e.message);
+			errorStep = id;
+			throw e;
+		}
+	}
+
+	try {
+		// Step 1: Generate account key
+		await step('keygen', async () => {
+			accountKey = await generateKeyPair();
+			accountJWK = await exportJWK(accountKey);
+			const thumbprint = await jwkThumbprint(accountJWK);
+			setStepDetail('keygen', 'Web Crypto: ECDSA P-256', { jwk: accountJWK, thumbprint });
+		});
+
+		// Snapshot tree size for consistency proof later
+		try {
+			const cpResp = await fetch('/checkpoint');
+			const cpText = await cpResp.text();
+			const lines = cpText.trim().split('\n');
+			snapshotTreeSize = parseInt(lines[1]) || 0;
+		} catch (e) { snapshotTreeSize = 0; }
+
+		// Step 2: Fetch directory
+		await step('directory', async () => {
+			const resp = await fetch(PROXY_BASE + '/acme/directory');
+			const body = await resp.json();
+			currentNonce = resp.headers.get('Replay-Nonce') || '';
+			setStepDetail('directory', 'GET /acme/directory', body);
+		});
+
+		// Step 3: Get nonce
+		await step('nonce', async () => {
+			const resp = await fetch(PROXY_BASE + '/acme/new-nonce', { method: 'HEAD' });
+			currentNonce = resp.headers.get('Replay-Nonce') || currentNonce;
+			setStepDetail('nonce', 'HEAD /acme/new-nonce', { nonce: currentNonce });
+		});
+
+		// Step 4: Create account
+		await step('account', async () => {
+			const jws = await buildJWS(
+				ACME_EXTERNAL_URL + '/acme/new-account', currentNonce,
+				{ termsOfServiceAgreed: true, contact: ['mailto:demo@example.com'] },
+				accountKey, accountJWK, null
+			);
+			const resp = await acmePost('/acme/new-account', jws);
+			accountURL = resp.location;
+			setStepDetail('account', { protected: '(JWS with jwk)', payload: { termsOfServiceAgreed: true } }, { status: resp.status, location: accountURL, body: resp.body });
+		});
+
+		// Step 5: Create order
+		let orderURL, orderBody;
+		await step('order', async () => {
+			const jws = await buildJWS(
+				ACME_EXTERNAL_URL + '/acme/new-order', currentNonce,
+				{ identifiers: [{ type: 'dns', value: domain }] },
+				accountKey, null, accountURL
+			);
+			const resp = await acmePost('/acme/new-order', jws);
+			orderURL = resp.location;
+			orderBody = resp.body;
+			setStepDetail('order', { identifiers: [{ type: 'dns', value: domain }] }, resp.body);
+		});
+
+		// Step 6: Fetch authorization
+		let challengeURL;
+		await step('authz', async () => {
+			const authzFullURL = orderBody.authorizations[0];
+			const jws = await buildJWS(
+				authzFullURL, currentNonce, '', accountKey, null, accountURL
+			);
+			const resp = await acmePost(extractProxyPath(authzFullURL), jws);
+			challengeURL = resp.body.challenges[0].url;
+			setStepDetail('authz', 'POST-as-GET ' + authzFullURL, resp.body);
+		});
+
+		// Step 7: Respond to challenge
+		await step('challenge', async () => {
+			const jws = await buildJWS(
+				challengeURL, currentNonce, {}, accountKey, null, accountURL
+			);
+			const resp = await acmePost(extractProxyPath(challengeURL), jws);
+			setStepDetail('challenge', 'POST {} to challenge (auto-approve)', resp.body);
+		});
+
+		// Step 8: Poll order until ready
+		await step('poll-ready', async () => {
+			let order = orderBody;
+			let polls = 0;
+			while (order.status === 'pending' || order.status === 'processing') {
+				if (++polls > 30) throw new Error('Order did not become ready after 30 polls');
+				await sleep(1000);
+				const jws = await buildJWS(orderURL, currentNonce, '', accountKey, null, accountURL);
+				const resp = await acmePost(extractProxyPath(orderURL), jws);
+				order = resp.body;
+			}
+			orderBody = order;
+			setStepDetail('poll-ready', 'Polled ' + polls + ' times', order);
+			if (order.status !== 'ready') throw new Error('Order status: ' + order.status);
+		});
+
+		// Step 9: Generate certificate key
+		await step('certkey', async () => {
+			certKey = await generateKeyPair();
+			const certJWK = await exportJWK(certKey);
+			setStepDetail('certkey', 'Web Crypto: ECDSA P-256', { jwk: certJWK });
+		});
+
+		// Step 10: Build CSR
+		let csrB64;
+		await step('csr', async () => {
+			const csrDER = await buildCSR(certKey, domain);
+			csrB64 = base64url(csrDER);
+			setStepDetail('csr', 'PKCS#10 DER (' + csrDER.length + ' bytes)', { csr_base64url: csrB64.substring(0, 80) + '...' });
+		});
+
+		// Step 11: Finalize order
+		await step('finalize', async () => {
+			const finalizeURL = orderBody.finalize;
+			const jws = await buildJWS(
+				finalizeURL, currentNonce, { csr: csrB64 }, accountKey, null, accountURL
+			);
+			const resp = await acmePost(extractProxyPath(finalizeURL), jws);
+			let order = resp.body;
+			let polls = 0;
+			while (order.status === 'processing') {
+				if (++polls > 60) throw new Error('Finalization timed out');
+				await sleep(2000);
+				const pollJWS = await buildJWS(orderURL, currentNonce, '', accountKey, null, accountURL);
+				const pollResp = await acmePost(extractProxyPath(orderURL), pollJWS);
+				order = pollResp.body;
+			}
+			orderBody = order;
+			setStepDetail('finalize', { csr: csrB64.substring(0, 40) + '...' }, order);
+			if (order.status !== 'valid') {
+				const detail = order.error ? ' — ' + order.error.detail : '';
+				throw new Error('Order status: ' + order.status + detail);
+			}
+		});
+
+		// Step 12: Download certificate
+		await step('download', async () => {
+			const certURL = orderBody.certificate;
+			const jws = await buildJWS(certURL, currentNonce, '', accountKey, null, accountURL);
+			const resp = await acmePost(extractProxyPath(certURL), jws);
+			certPEM = typeof resp.body === 'string' ? resp.body : JSON.stringify(resp.body);
+
+			// Extract serial from PEM for proof lookups
+			try {
+				const b64 = certPEM.split('-----BEGIN CERTIFICATE-----')[1].split('-----END CERTIFICATE-----')[0].trim();
+				const der = base64Decode(b64);
+				const fields = parseCertDER(der);
+				certSerial = (fields.serialNumber || '').toUpperCase();
+			} catch (e) { /* serial extraction failed, proofs may not work */ }
+
+			setStepDetail('download', 'POST-as-GET ' + certURL, certPEM.substring(0, 200) + '...');
+		});
+
+		// Step 13: Fetch inclusion proof
+		await step('inclusion', async () => {
+			if (!certSerial) throw new Error('No certificate serial available');
+			const resp = await fetch('/proof/inclusion?serial=' + certSerial);
+			if (!resp.ok) throw new Error('HTTP ' + resp.status);
+			inclusionData = await resp.json();
+			setStepDetail('inclusion', 'GET /proof/inclusion?serial=' + certSerial, inclusionData);
+		});
+
+		// Step 14: Fetch consistency proof
+		await step('consistency', async () => {
+			if (snapshotTreeSize <= 0) throw new Error('No tree snapshot available');
+			const newSize = inclusionData ? inclusionData.tree_size : snapshotTreeSize + 1;
+			if (snapshotTreeSize >= newSize) {
+				setStepDetail('consistency', 'Skipped', { reason: 'Tree did not grow (old=' + snapshotTreeSize + ', new=' + newSize + ')' });
+				return;
+			}
+			const resp = await fetch('/proof/consistency?old=' + snapshotTreeSize + '&new=' + newSize);
+			if (!resp.ok) throw new Error('HTTP ' + resp.status);
+			consistencyData = await resp.json();
+			setStepDetail('consistency', 'GET /proof/consistency?old=' + snapshotTreeSize + '&new=' + newSize, consistencyData);
+		});
+
+		// Step 15: Verify proofs
+		await step('verify', async () => {
+			const results = {};
+			if (inclusionData) {
+				const ok = await verifyInclusionProof(
+					inclusionData.leaf_hash, inclusionData.leaf_index,
+					inclusionData.tree_size, inclusionData.proof, inclusionData.root_hash
+				);
+				results.inclusion = ok ? 'PASS' : 'FAIL';
+			}
+			results.consistency = consistencyData ? 'PRESENT' : 'SKIPPED';
+			setStepDetail('verify', 'Client-side SHA-256 verification', results);
+		});
+
+		// Show results
+		document.getElementById('results').classList.remove('hidden');
+		renderCertResult(certPEM);
+		if (inclusionData) {
+			renderInclusionProof(inclusionData);
+			// Run verification and show badge
+			try {
+				const ok = await verifyInclusionProof(
+					inclusionData.leaf_hash, inclusionData.leaf_index,
+					inclusionData.tree_size, inclusionData.proof, inclusionData.root_hash
+				);
+				document.getElementById('inclusion-verify').innerHTML = ok
+					? '<span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-green-100 text-green-800 text-sm font-medium">PASS — Inclusion proof verified</span>'
+					: '<span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-red-100 text-red-800 text-sm font-medium">FAIL — Root hash mismatch</span>';
+			} catch (e) {
+				document.getElementById('inclusion-verify').innerHTML = '<span class="text-sm text-gray-500">Verification error: ' + escapeHTML(e.message) + '</span>';
+			}
+		}
+		if (consistencyData) {
+			renderConsistencyProof(consistencyData);
+			document.getElementById('consistency-verify').innerHTML = '<span class="inline-flex items-center gap-1 px-3 py-1 rounded-full bg-green-100 text-green-800 text-sm font-medium">PRESENT — Append-only consistency proof available</span>';
+		}
+		showResultTab('cert');
+
+	} catch (e) {
+		console.error('Demo failed at step ' + errorStep + ':', e);
+	}
+
+	btn.disabled = false;
+	btn.textContent = 'Run Demo';
+}
+
+// Initialize
+if (!ACME_EXTERNAL_URL) {
+	document.getElementById('steps').innerHTML = '<div class="bg-amber-50 border border-amber-200 rounded-lg p-6 text-center"><p class="text-amber-800 font-medium">ACME server is not configured</p><p class="text-amber-600 text-sm mt-1">Enable the ACME server in config.yaml (acme.enabled: true) and restart the service.</p></div>';
+	document.getElementById('run-btn').disabled = true;
+} else {
+	renderSteps();
+}
+</script>
 </body>
 </html>`

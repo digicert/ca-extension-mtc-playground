@@ -64,7 +64,7 @@ assertion_issuer:
   #     secret: "webhook-secret"
 
 local_ca:
-  enabled: false
+  enabled: true
   key_file: "${MTC_LOCAL_CA_KEY:-keys/local-ca.key}"
   cert_file: "${MTC_LOCAL_CA_CERT:-keys/local-ca.pem}"
   validity: 8760h    # 1 year
